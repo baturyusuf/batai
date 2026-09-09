@@ -19,12 +19,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f .batai-bootstrap.tar.gz.b64 ]; then
-            echo "Bootstrap payload not present; nothing to import."
+          if [ ! -f .batai-bootstrap.ready ]; then
+            echo "Bootstrap payload is not ready; nothing to import."
             exit 0
           fi
-          base64 -d .batai-bootstrap.tar.gz.b64 | tar -xzf - -C .
-          rm -f .batai-bootstrap.tar.gz.b64
+          cat .batai-bootstrap.part.* > /tmp/batai-bootstrap.tar.gz.b64
+          base64 -d /tmp/batai-bootstrap.tar.gz.b64 | tar -xzf - -C .
+          rm -f .batai-bootstrap.tar.gz.b64 .batai-bootstrap.ready .batai-bootstrap.part.*
           rm -f .github/workflows/bootstrap-import.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
