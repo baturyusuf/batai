@@ -1,0 +1,33 @@
+name: bootstrap-import
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    if: ${{ github.actor != 'github-actions[bot]' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Import Batai MVP
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f .batai-bootstrap.tar.gz.b64 ]; then
+            echo "Bootstrap payload not present; nothing to import."
+            exit 0
+          fi
+          base64 -d .batai-bootstrap.tar.gz.b64 | tar -xzf - -C .
+          rm -f .batai-bootstrap.tar.gz.b64
+          rm -f .github/workflows/bootstrap-import.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "feat: import Batai orchestration MVP"
+          git push origin HEAD:main
