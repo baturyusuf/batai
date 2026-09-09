@@ -24,7 +24,7 @@ jobs:
             exit 0
           fi
           cat .batai-bootstrap.part.* > /tmp/batai-bootstrap.tar.gz.b64
-          base64 -d /tmp/batai-bootstrap.tar.gz.b64 | tar -xzf - -C .
+          base64 -d /tmp/batai-bootstrap.tar.gz.b64 | tar -xzf - --strip-components=1 -C .
           rm -f .batai-bootstrap.tar.gz.b64 .batai-bootstrap.ready .batai-bootstrap.part.*
           rm -f .github/workflows/bootstrap-import.yml
           git config user.name "github-actions[bot]"
