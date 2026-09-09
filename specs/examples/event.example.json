@@ -1,0 +1,13 @@
+{
+  "id": "EVT-0001",
+  "type": "TASK_COMPLETED",
+  "timestamp": "2026-09-09T18:00:00+03:00",
+  "source": "agent8",
+  "target": "director",
+  "task_id": "TASK-248",
+  "payload": {
+    "commit": "abc123",
+    "tests_passed": 47,
+    "tests_failed": 0
+  }
+}

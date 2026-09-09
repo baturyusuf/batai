@@ -1,0 +1,17 @@
+{
+  "name": "batai",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Director-managed, cost-aware heterogeneous AI developer organization runtime.",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "demo:init": "node scripts/init-demo.mjs",
+    "test": "node --test --test-reporter=spec",
+    "test:watch": "node --test --watch",
+    "mcp": "node src/control/mcp-server.mjs"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

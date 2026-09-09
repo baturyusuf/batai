@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Batai Decision",
+  "type": "object",
+  "required": [
+    "id",
+    "topic",
+    "status"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "topic": {
+      "type": "string"
+    },
+    "question": {
+      "type": "string"
+    },
+    "director_recommendation": {},
+    "alternatives": {
+      "type": "array"
+    },
+    "impact": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "requires": {
+      "enum": [
+        "NONE",
+        "DIRECTOR",
+        "CUSTOMER",
+        "GOD"
+      ]
+    },
+    "effective_decision": {},
+    "decided_by": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "status": {
+      "enum": [
+        "OPEN",
+        "PROPOSED",
+        "APPROVED",
+        "REJECTED",
+        "LOCKED"
+      ]
+    }
+  }
+}

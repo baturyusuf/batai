@@ -1,0 +1,17 @@
+{
+  "id": "director",
+  "name": "Director",
+  "role_template": "Director",
+  "parent_agent_id": null,
+  "provider": "mock",
+  "model": "frontier-high",
+  "reasoning_effort": "high",
+  "auth_mode": "subscription",
+  "worktree": null,
+  "allowed_paths": [".batai/**", "specs/**"],
+  "tools": ["create_agent", "assign_task", "read_project_state", "approve_task"],
+  "constraints": ["Ask product-impacting questions only", "Prefer the minimum sufficient intelligence for each task"],
+  "max_turns": 50,
+  "lifetime": "project",
+  "status": "READY"
+}

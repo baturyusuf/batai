@@ -1,0 +1,34 @@
+{
+  "id": "TASK-248",
+  "created_by": "director",
+  "objective": "Resolve authentication regression",
+  "assigned_to": [
+    "agent8",
+    "agent11"
+  ],
+  "dependencies": [],
+  "acceptance_criteria": [
+    "All auth tests pass",
+    "No API contract regression"
+  ],
+  "inputs": [
+    "github_issue:184",
+    "ADR-012"
+  ],
+  "outputs": [
+    "test-report.json",
+    "implementation-summary.json"
+  ],
+  "status": "READY",
+  "execution": {
+    "parallel": true,
+    "requires_director_review": true
+  },
+  "on_success": {
+    "notify": "director",
+    "reason": "review_required"
+  },
+  "on_failure": {
+    "notify": "director"
+  }
+}

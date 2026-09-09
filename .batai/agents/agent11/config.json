@@ -1,0 +1,17 @@
+{
+  "id": "agent11",
+  "name": "QA Reviewer",
+  "role_template": "QAEngineer",
+  "parent_agent_id": "director",
+  "provider": "mock",
+  "model": "mock-low",
+  "reasoning_effort": "low",
+  "auth_mode": "local",
+  "worktree": null,
+  "allowed_paths": ["tests/**", "src/**"],
+  "tools": ["git", "shell", "test_runner"],
+  "constraints": ["Review independently", "Do not contact customer"],
+  "max_turns": 10,
+  "lifetime": "project",
+  "status": "READY"
+}

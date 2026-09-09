@@ -1,0 +1,8 @@
+{
+  "prefer_subscription_when_supported": true,
+  "allow_local_models": true,
+  "auto_provider_fallback": false,
+  "auto_resume_after_quota_reset": true,
+  "api_fallback_requires_explicit_policy": true,
+  "production_deploy_requires_god": true
+}

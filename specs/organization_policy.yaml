@@ -1,0 +1,21 @@
+organization:
+  max_active_agents: 8
+  max_hierarchy_depth: 3
+  worker_can_spawn_agents: false
+  lead_can_request_agent: true
+  director_can_request_agent: true
+  new_agent_requires_policy_validation: true
+  permanent_agent_requires_god_approval: true
+  default_agent_lifetime: task_scoped
+
+meetings:
+  max_participants: 5
+  max_rounds: 2
+  director_closes_meeting: true
+
+resource_policy:
+  auto_provider_fallback: false
+  auto_resume_after_quota_reset: true
+  prefer_subscription_when_supported: true
+  allow_local_models: true
+  api_fallback_requires_explicit_policy: true

@@ -1,0 +1,27 @@
+{
+  "id": "backend-01",
+  "name": "Backend Engineer",
+  "role_template": "SoftwareEngineer",
+  "parent_agent_id": "director",
+  "provider": "codex",
+  "model": "coding-medium",
+  "reasoning_effort": "medium",
+  "auth_mode": "subscription",
+  "worktree": "worktrees/backend-01",
+  "allowed_paths": [
+    "backend/**",
+    "tests/backend/**"
+  ],
+  "tools": [
+    "git",
+    "shell",
+    "test_runner"
+  ],
+  "constraints": [
+    "Do not modify frontend",
+    "Do not contact customer"
+  ],
+  "max_turns": 18,
+  "lifetime": "project",
+  "status": "READY"
+}

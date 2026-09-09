@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Batai Control Plane</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <h1>Batai</h1>
+      <p>Director-managed AI developer organization runtime</p>
+    </div>
+    <div id="health" class="status-pill">connecting</div>
+  </header>
+
+  <main>
+    <section class="hero-grid">
+      <article class="panel director-panel">
+        <div class="panel-title"><h2>Director Control</h2><span class="badge">GOD → Director</span></div>
+        <p class="muted">The MVP exposes Director tools directly. Real LLM adapters plug into this control plane later.</p>
+        <div class="form-grid">
+          <input id="agent-id" placeholder="agent id (e.g. backend-02)" />
+          <input id="agent-name" placeholder="agent name" />
+          <input id="agent-role" placeholder="role template" value="SoftwareEngineer" />
+          <select id="agent-provider"><option value="mock">mock</option><option value="codex-cli">Codex CLI</option><option value="claude-cli">Claude Code</option><option value="ollama">Ollama local</option></select>
+          <input id="agent-model" placeholder="model (e.g. sonnet / gpt-5.5 / qwen3:14b)" value="mock-medium" />
+          <select id="agent-reasoning"><option>low</option><option selected>medium</option><option>high</option><option>extra_high</option></select>
+          <button id="create-agent">Create mock agent</button>
+        </div>
+        <div id="agent-form-message" class="message"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-title"><h2>Assign Task</h2><span class="badge">event-driven</span></div>
+        <div class="form-grid">
+          <input id="task-id" placeholder="TASK-001" />
+          <input id="task-agent" placeholder="agent id" />
+          <textarea id="task-objective" placeholder="Objective"></textarea>
+          <input id="task-deps" placeholder="dependencies, comma separated" />
+          <label class="check"><input id="task-review" type="checkbox" /> Director review required</label>
+          <button id="create-task">Write task JSON</button>
+        </div>
+        <div id="task-form-message" class="message"></div>
+      </article>
+    </section>
+
+    <section class="hero-grid">
+      <article class="panel god-panel">
+        <div class="panel-title"><h2>GOD Console</h2><span class="badge authority">authority 100</span></div>
+        <p class="muted">Send a project, global or task-scoped instruction to Director. It is persisted in the Director inbox.</p>
+        <div class="form-grid">
+          <select id="god-scope"><option value="project">project policy</option><option value="task">task instruction</option><option value="global">global policy</option></select>
+          <textarea id="god-message" placeholder="Director'a doğal dil ile müdahale et..."></textarea>
+          <button id="send-god-message">Send to Director</button>
+        </div>
+        <div id="god-form-message" class="message"></div>
+        <div id="director-inbox" class="compact-list"></div>
+      </article>
+
+      <article class="panel">
+        <div class="panel-title"><h2>Decision Ledger</h2><span id="decision-count" class="badge">0 decisions</span></div>
+        <div id="decisions" class="compact-list"></div>
+      </article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title"><h2>Provider Capacity</h2><span class="badge">subscription / local / CLI</span></div>
+      <div id="providers" class="cards"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title"><h2>Organization</h2><span id="agent-count" class="badge">0 agents</span></div>
+      <div id="agents" class="cards"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title"><h2>Task Board</h2><span id="task-count" class="badge">0 tasks</span></div>
+      <div id="tasks" class="task-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title"><h2>Event Stream</h2><span class="badge">no LLM coordination</span></div>
+      <div id="events" class="events"></div>
+    </section>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

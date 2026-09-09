@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "batai": {
+      "command": "node",
+      "args": ["/absolute/path/to/batai/src/control/mcp-server.mjs"],
+      "env": {
+        "BATAI_PROJECT_ROOT": "/absolute/path/to/customer-project"
+      }
+    }
+  }
+}

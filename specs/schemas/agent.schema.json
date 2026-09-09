@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Batai AgentConfig",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "role_template",
+    "provider",
+    "model",
+    "reasoning_effort",
+    "status"
+  ],
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "name": {
+      "type": "string"
+    },
+    "role_template": {
+      "type": "string"
+    },
+    "parent_agent_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "reasoning_effort": {
+      "enum": [
+        "none",
+        "low",
+        "medium",
+        "high",
+        "extra_high"
+      ]
+    },
+    "auth_mode": {
+      "enum": [
+        "subscription",
+        "oauth",
+        "cli_session",
+        "local",
+        "api_key"
+      ]
+    },
+    "worktree": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "allowed_paths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "tools": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "max_turns": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "lifetime": {
+      "enum": [
+        "task_scoped",
+        "project",
+        "permanent"
+      ]
+    },
+    "status": {
+      "enum": [
+        "CREATED",
+        "INITIALIZING",
+        "READY",
+        "RUNNING",
+        "BLOCKED",
+        "WAITING_RESOURCE",
+        "PAUSED",
+        "COMPLETED",
+        "FAILED",
+        "TERMINATED"
+      ]
+    }
+  }
+}

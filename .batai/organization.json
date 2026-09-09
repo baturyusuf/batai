@@ -1,0 +1,12 @@
+{
+  "project": "batai",
+  "god": "human-owner",
+  "director": "director",
+  "hierarchy": {
+    "director": ["agent8", "agent11"]
+  },
+  "limits": {
+    "max_active_agents": 8,
+    "max_hierarchy_depth": 3
+  }
+}

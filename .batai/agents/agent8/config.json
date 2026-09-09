@@ -1,0 +1,17 @@
+{
+  "id": "agent8",
+  "name": "Backend Worker",
+  "role_template": "SoftwareEngineer",
+  "parent_agent_id": "director",
+  "provider": "mock",
+  "model": "mock-medium",
+  "reasoning_effort": "medium",
+  "auth_mode": "local",
+  "worktree": null,
+  "allowed_paths": ["src/core/**", "tests/**"],
+  "tools": ["git", "shell", "test_runner"],
+  "constraints": ["Do not contact customer", "Do not modify UI without Director approval"],
+  "max_turns": 18,
+  "lifetime": "project",
+  "status": "READY"
+}
