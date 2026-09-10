@@ -2,7 +2,7 @@
 
 **Batai** is a Director-managed, cost-aware runtime for heterogeneous AI developer teams.
 
-> The `codex/rust-rewrite` branch contains the new Rust/Tauri desktop foundation and organization-first interface. The Node control plane remains temporarily as a compatibility layer while runtime modules are migrated.
+> The `codex/rust-rewrite` branch contains the Rust/Tauri desktop and deterministic execution runtime. The Node control plane remains temporarily as a compatibility/reference layer while real provider and remaining control-plane modules are migrated.
 
 The core idea is that the **Director AI operates the organization through Batai tools**. Batai itself stays deterministic wherever possible: task routing, dependencies, events, worktrees, quota waiting, session recovery and authority state should not spend LLM turns.
 
@@ -31,7 +31,10 @@ The core idea is that the **Director AI operates the organization through Batai 
 - GitHub CLI issue/PR adapter when `gh` is available
 - MCP-compatible Director control server
 - Browser control plane with organization, tasks, providers, GOD Console and Decision Ledger
-- Tauri 2 desktop source scaffold
+- Tauri 2 desktop application backed by the Rust runtime
+- Rust bundled-SQLite migrations, typed runtime state and persist-first events
+- Rust task watcher, dependency DAG, idempotent dispatch and per-agent serialization
+- Persistent multi-agent checkpoints, session fingerprints and durable quota recovery jobs
 
 ## Run the tested control plane
 
@@ -60,7 +63,7 @@ npm run test:all
 npm run desktop:dev
 ```
 
-The Rust desktop reads the existing `.batai` repository contract, shows agents by organizational role, exposes weighted task progress and checks official Codex, Claude Code, GitHub and Ollama connection states without storing raw credentials.
+The Rust desktop ingests the existing `.batai` repository contract into its operational SQLite runtime, watches tasks, executes deterministic mock-provider flows, shows live persisted agent/task state and checks official Codex, Claude Code, GitHub and Ollama connection states without storing raw credentials. Real provider execution remains on the Node compatibility layer until each adapter is connected to the Rust execution trait and integration-tested.
 
 ## Director MCP server
 
@@ -146,12 +149,11 @@ tests/          orchestration/provider tests
 .batai/         declarative organization/project state
 ```
 
-## Current environment limitations
+## Current limitations
 
-The implementation has automated tests and a runnable Node control plane. In the build environment used to create this repository:
-
-- Rust/Cargo is not installed, so the Tauri shell could not be compiled.
-- `codex`, `claude` and `gh` binaries are not installed, so their authenticated end-to-end sessions could not be exercised here.
-- Ollama integration is tested through a local fake HTTP server; a real Ollama daemon can be used on a developer machine.
+- Rust real-provider execution adapters are not yet connected; Codex, Claude Code, GitHub and Ollama Rust modules currently provide connection/authentication probes and guidance.
+- Crash recovery reconciles persisted runtime/checkpoint state; it does not yet reattach to an independently surviving provider process.
+- The Rust event engine exposes a broadcast boundary, but the desktop UI still refreshes through snapshot requests rather than pushed Tauri window events.
+- Authority, decision ledger, organizational memory, worktree and GitHub lifecycle parity still comes from the Node compatibility layer.
 
 See `docs/IMPLEMENTATION_STATUS.md` and `specs/` for the remaining roadmap.

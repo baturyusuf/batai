@@ -56,11 +56,17 @@ Automated test suite: **23 passing tests** at the time of this snapshot.
 ## Rust and Tauri rewrite branch
 
 - Tauri 2 desktop executable compiles on Windows.
-- Rust project-state, weighted-progress and provider-connection modules.
+- Bundled SQLite runtime with safe legacy-compatible migrations, WAL and foreign keys.
+- Typed agent/task/resource/event/scheduler state and persist-first event engine.
+- Rust task watcher, idempotent ingestion, dependency DAG/cycle handling and review gates.
+- Per-agent execution serialization and persistent multi-agent task-run checkpoints.
+- Provider-neutral execution/session abstraction with fingerprint-safe session recovery.
+- Persistent quota state, durable deduplicated resume jobs and restart reconciliation.
+- Runtime-backed agent/task/progress snapshots.
 - Organization-first Overview and Organization Map.
 - Workspace, Task Board, Accounts and Agent Inspector surfaces.
 - Official connection guidance for Codex, Claude Code, GitHub and Ollama.
-- Six passing Rust unit tests.
+- Thirty-seven passing Rust tests, including thirty-one runtime migration/recovery scenarios.
 
 The Node HTTP control plane remains as a compatibility layer until the Rust task, event, session and resource engines reach feature parity.
 
@@ -72,6 +78,6 @@ The Node HTTP control plane remains as a compatibility layer until the Rust task
 4. Add richer provider-specific quota telemetry/reset extraction.
 5. Add Agent-to-Agent meeting/message primitives on top of structured events.
 6. Run real GitHub issue → task → PR workflow with authenticated `gh`.
-7. Complete the Rust task/event/session/resource migration and remove the compatibility runtime.
+7. Port remaining authority/memory/Git control-plane behavior, then remove the compatibility runtime after real-provider parity.
 8. Add native editor/LSP/terminal integration beyond the workspace scaffold.
 9. Add crash/reconciliation tests for concurrent real provider processes.
