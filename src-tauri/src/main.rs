@@ -8,6 +8,7 @@ mod providers;
 mod runtime;
 
 use std::path::PathBuf;
+use tauri::Emitter;
 
 use domain::{AppSnapshot, ConnectionGuide, MessageReceipt, ProviderConnection};
 use project::{discover_project_root, ProjectStore};
@@ -44,6 +45,17 @@ fn send_director_message(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+async fn cancel_task(task_id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    state
+        .runtime
+        .tasks
+        .cancel(&task_id, "user")
+        .await
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
 fn main() {
     let project_root = std::env::var_os("BATAI_PROJECT_ROOT")
         .map(PathBuf::from)
@@ -63,10 +75,24 @@ fn main() {
             get_app_snapshot,
             get_provider_connections,
             get_connection_guide,
-            send_director_message
+            send_director_message,
+            cancel_task
         ])
         .build(tauri::generate_context!())
         .expect("error while building Batai desktop shell");
+    let app_handle = app.handle().clone();
+    let mut runtime_events = runtime.events.subscribe();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match runtime_events.recv().await {
+                Ok(event) => {
+                    let _ = app_handle.emit("batai://runtime-event", event);
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
     app.run(|_, _| {});
     tauri::async_runtime::block_on(runtime.shutdown()).expect("failed to stop Batai runtime");
 }

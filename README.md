@@ -63,7 +63,7 @@ npm run test:all
 npm run desktop:dev
 ```
 
-The Rust desktop ingests the existing `.batai` repository contract into its operational SQLite runtime, watches tasks, executes deterministic mock-provider flows, shows live persisted agent/task state and checks official Codex, Claude Code, GitHub and Ollama connection states without storing raw credentials. Real provider execution remains on the Node compatibility layer until each adapter is connected to the Rust execution trait and integration-tested.
+The Rust desktop ingests the existing `.batai` repository contract into SQLite, watches tasks, assigns coding agents safe task worktrees and executes Codex App Server, Claude Code or Ollama through provider-neutral sessions. State and usage updates stream into the UI without storing raw credentials. See [Provider Runtime](docs/PROVIDER_RUNTIME.md) for setup, security and diagnostics.
 
 ## Director MCP server
 
@@ -151,9 +151,9 @@ tests/          orchestration/provider tests
 
 ## Current limitations
 
-- Rust real-provider execution adapters are not yet connected; Codex, Claude Code, GitHub and Ollama Rust modules currently provide connection/authentication probes and guidance.
-- Crash recovery reconciles persisted runtime/checkpoint state; it does not yet reattach to an independently surviving provider process.
-- The Rust event engine exposes a broadcast boundary, but the desktop UI still refreshes through snapshot requests rather than pushed Tauri window events.
-- Authority, decision ledger, organizational memory, worktree and GitHub lifecycle parity still comes from the Node compatibility layer.
+- Claude Code and Ollama require their local executables/services and have not been authenticated on every CI host; their deterministic contracts are tested without credentials.
+- Crash recovery preserves provider/session/worktree evidence and requires review after an uncertain mutation; it does not reattach to an independently surviving OS process.
+- Headless provider approval requests are conservatively cancelled. An interactive GOD approval queue is still planned.
+- Authority, decision ledger, organizational memory and GitHub lifecycle parity still partly comes from the Node compatibility layer.
 
 See `docs/IMPLEMENTATION_STATUS.md` and `specs/` for the remaining roadmap.

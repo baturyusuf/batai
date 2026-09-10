@@ -9,6 +9,7 @@ pub mod store;
 pub mod tasks;
 pub mod types;
 pub mod watcher;
+pub mod worktrees;
 
 use std::{
     collections::HashMap,
@@ -19,6 +20,10 @@ use std::{
 
 use crate::domain::{
     task_progress, weighted_progress, AgentView, AppSnapshot, ProjectSummary, TaskView,
+};
+use crate::providers::{
+    claude_code::ClaudeCodeProvider, codex_app_server::CodexAppServerProvider,
+    ollama::OllamaProvider,
 };
 use agents::AgentRegistry;
 use errors::Result;
@@ -47,6 +52,17 @@ impl BataiRuntime {
         let mock = Arc::new(MockProvider::default());
         let mut providers = HashMap::<String, Arc<dyn ExecutionProvider>>::new();
         providers.insert("mock".into(), mock);
+        providers.insert("codex".into(), Arc::new(CodexAppServerProvider::default()));
+        providers.insert(
+            "codex-app-server".into(),
+            Arc::new(CodexAppServerProvider::default()),
+        );
+        providers.insert("claude".into(), Arc::new(ClaudeCodeProvider::default()));
+        providers.insert(
+            "claude-code".into(),
+            Arc::new(ClaudeCodeProvider::default()),
+        );
+        providers.insert("ollama".into(), Arc::new(OllamaProvider::default()));
         Self::with_store(root, store, providers)
     }
 
@@ -58,13 +74,17 @@ impl BataiRuntime {
         let events = EventEngine::new(store.clone());
         let agents = AgentRegistry::new(store.clone(), events.clone());
         let sessions = SessionManager::new(store.clone(), providers);
-        let tasks = Arc::new(TaskEngine::new(
+        let mut task_engine = TaskEngine::new(
             store.clone(),
             events.clone(),
             agents.clone(),
             sessions.clone(),
             Duration::from_secs(15 * 60),
-        ));
+        );
+        if let Ok(manager) = worktrees::WorktreeManager::discover(&root) {
+            task_engine = task_engine.with_worktrees(manager);
+        }
+        let tasks = Arc::new(task_engine);
         Ok(Arc::new(Self {
             root,
             store,

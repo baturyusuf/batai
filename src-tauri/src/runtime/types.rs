@@ -71,7 +71,8 @@ uppercase_enum!(TaskRunStatus {
     Completed,
     Failed,
     WaitingResource,
-    Cancelled
+    Cancelled,
+    UnknownAfterCrash
 });
 uppercase_enum!(EventType {
     TaskCreated,
@@ -88,7 +89,22 @@ uppercase_enum!(EventType {
     AgentStatusChanged,
     AgentRateLimited,
     AgentResumed,
-    ResourceStatusChanged
+    ResourceStatusChanged,
+    ProviderProcessStarted,
+    ProviderProcessExited,
+    ProviderSessionStarted,
+    ProviderSessionResumed,
+    ProviderTurnStarted,
+    ProviderTurnCompleted,
+    ProviderTurnFailed,
+    ProviderApprovalRequested,
+    ProviderApprovalDeclined,
+    UsageUpdated,
+    WorktreeCreated,
+    WorktreeReused,
+    WorktreeDirty,
+    TaskCancellationRequested,
+    ProviderCrashDetected
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -230,6 +246,7 @@ pub struct TaskRun {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub updated_at: String,
+    pub checkpoint: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use super::errors::Result;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(
@@ -96,6 +96,14 @@ pub fn migrate(connection: &mut Connection) -> Result<()> {
         )?;
     }
     apply(connection, 3, "CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_agent_pending ON scheduler_jobs(kind, agent_id) WHERE status IN ('PENDING','RUNNING') AND agent_id IS NOT NULL;")?;
+    if !column_exists(connection, "task_runs", "checkpoint_json")? {
+        connection.execute("ALTER TABLE task_runs ADD COLUMN checkpoint_json TEXT", [])?;
+    }
+    apply(
+        connection,
+        4,
+        "CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status, updated_at);",
+    )?;
     Ok(())
 }
 

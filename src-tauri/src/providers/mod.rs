@@ -1,10 +1,14 @@
+pub mod claude_code;
 mod cli;
+pub mod codex_app_server;
+pub mod ollama;
+pub mod process_supervisor;
 
 use crate::domain::{ConnectionGuide, ProviderConnection};
 
 pub fn probe_all() -> Vec<ProviderConnection> {
     vec![
-        cli::probe("codex", "Codex", "Subscription", &["login", "status"]),
+        cli::probe_codex(),
         cli::probe("claude", "Claude Code", "Subscription", &["auth", "status"]),
         cli::probe("gh", "GitHub", "Account", &["auth", "status"]),
         cli::local_provider("ollama", "Ollama", "Local runtime"),

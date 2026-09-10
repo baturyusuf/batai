@@ -34,6 +34,7 @@ pub struct TaskEngine {
     agent_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
     running_tasks: Arc<Mutex<HashSet<String>>>,
     unknown_quota_retry: Duration,
+    worktrees: Option<super::worktrees::WorktreeManager>,
 }
 
 impl TaskEngine {
@@ -52,7 +53,13 @@ impl TaskEngine {
             agent_locks: Default::default(),
             running_tasks: Default::default(),
             unknown_quota_retry,
+            worktrees: None,
         }
+    }
+
+    pub fn with_worktrees(mut self, manager: super::worktrees::WorktreeManager) -> Self {
+        self.worktrees = Some(manager);
+        self
     }
 
     pub async fn ingest_file(self: &Arc<Self>, path: &Path) -> Result<IngestDisposition> {
@@ -223,6 +230,8 @@ impl TaskEngine {
 
         let mut resource_error = None;
         let mut provider_error = None;
+        let mut unknown_error = None;
+        let mut cancelled = false;
         for handle in handles {
             match handle.await.map_err(|error| {
                 RuntimeError::Provider(format!("execution worker stopped: {error}"))
@@ -231,8 +240,24 @@ impl TaskEngine {
                 Err(error @ RuntimeError::ResourceUnavailable { .. }) => {
                     resource_error = Some(error)
                 }
+                Err(RuntimeError::Cancelled(_)) => cancelled = true,
+                Err(error @ RuntimeError::UnknownAfterCrash(_)) => unknown_error = Some(error),
                 Err(error) => provider_error = Some(error),
             }
+        }
+        if cancelled || self.required_task(task_id)?.status == TaskStatus::Cancelled {
+            return self.required_task(task_id);
+        }
+        if let Some(error) = unknown_error {
+            self.set_status(task_id, TaskStatus::Review)?;
+            self.events.publish(
+                EventType::ReviewRequired,
+                "batai",
+                Some("director".into()),
+                Some(task_id.into()),
+                serde_json::json!({"reason":"unknown_after_crash","error":error.to_string()}),
+            )?;
+            return self.required_task(task_id);
         }
         if let Some(error) = provider_error {
             self.set_status(task_id, TaskStatus::Failed)?;
@@ -287,6 +312,26 @@ impl TaskEngine {
             .agents
             .get(&agent_id)?
             .ok_or_else(|| RuntimeError::AgentNotFound(agent_id.clone()))?;
+        let mut binding = None;
+        if super::worktrees::role_requires_worktree(&agent.role_template) {
+            if let Some(manager) = &self.worktrees {
+                let created = manager.ensure(&agent_id, &task.id)?;
+                agent.worktree = Some(created.path.to_string_lossy().into_owned());
+                self.agents.register(&agent)?;
+                self.events.publish(
+                    if created.reused {
+                        EventType::WorktreeReused
+                    } else {
+                        EventType::WorktreeCreated
+                    },
+                    agent_id.clone(),
+                    None,
+                    Some(task.id.clone()),
+                    serde_json::to_value(&created)?,
+                )?;
+                binding = Some(created);
+            }
+        }
         match agent.status {
             AgentStatus::Created => {
                 self.agents
@@ -316,6 +361,7 @@ impl TaskEngine {
             self.agents
                 .transition(&agent_id, AgentStatus::Running, Some(&task.id))?;
         }
+        let resumed_session = self.store.get_session(&agent_id)?.is_some();
         let session = self.sessions.ensure(&agent).await?;
         self.store.mark_task_run(
             &task.id,
@@ -325,6 +371,30 @@ impl TaskEngine {
             Some(&agent.provider),
             Some(&session.provider_session_id),
         )?;
+        self.store.update_task_run_checkpoint(&task.id, &agent_id, &serde_json::json!({
+            "execution_state":"running","provider":agent.provider,"session_id":session.provider_session_id,
+            "worktree":binding.as_ref().map(|b| b.path.to_string_lossy().into_owned()),
+            "branch":binding.as_ref().map(|b| b.branch.clone()),"base_commit":binding.as_ref().map(|b| b.base_commit.clone()),
+            "starting_head":binding.as_ref().map(|b| b.starting_head.clone()),"started_at":chrono::Utc::now().to_rfc3339()
+        }))?;
+        self.events.publish(
+            if resumed_session {
+                EventType::ProviderSessionResumed
+            } else {
+                EventType::ProviderSessionStarted
+            },
+            agent_id.clone(),
+            None,
+            Some(task.id.clone()),
+            serde_json::json!({"provider":agent.provider,"session_id":session.provider_session_id}),
+        )?;
+        self.events.publish(
+            EventType::ProviderTurnStarted,
+            agent_id.clone(),
+            None,
+            Some(task.id.clone()),
+            serde_json::json!({"provider":agent.provider,"session_id":session.provider_session_id}),
+        )?;
         self.events.publish(
             EventType::TaskDispatched,
             "batai",
@@ -333,18 +403,91 @@ impl TaskEngine {
             serde_json::json!({"session_id":session.provider_session_id}),
         )?;
         let provider = self.sessions.provider_for(&agent)?;
-        match provider
+        self.events.publish(
+            EventType::ProviderProcessStarted,
+            agent_id.clone(),
+            None,
+            Some(task.id.clone()),
+            serde_json::json!({"provider":agent.provider,"session_id":session.provider_session_id}),
+        )?;
+        let provider_outcome = provider
             .send_task(&session.provider_session_id, &agent, &task)
-            .await
-        {
-            Ok(result) => {
+            .await;
+        self.events.publish(EventType::ProviderProcessExited, agent_id.clone(), None, Some(task.id.clone()),
+            serde_json::json!({"provider":agent.provider,"session_id":session.provider_session_id,"success":provider_outcome.is_ok()}))?;
+        match provider_outcome {
+            Ok(mut result) => {
+                if self.required_task(&task.id)?.status == TaskStatus::Cancelled {
+                    self.store.mark_task_run(
+                        &task.id,
+                        &agent_id,
+                        TaskRunStatus::Cancelled,
+                        None,
+                        Some(&agent.provider),
+                        Some(&session.provider_session_id),
+                    )?;
+                    self.agents
+                        .transition(&agent_id, AgentStatus::Ready, None)?;
+                    return Err(RuntimeError::Cancelled(task.id));
+                }
+                let (ending_head, changed_files) =
+                    if let (Some(manager), Some(binding)) = (&self.worktrees, &binding) {
+                        let status = manager.status(binding)?;
+                        (Some(manager.head(binding)?), status)
+                    } else {
+                        (None, vec![])
+                    };
+                if result.changed_files.is_empty() {
+                    result.changed_files = changed_files;
+                }
+                let returned_session_id = result.session_id.clone();
+                self.sessions.update_after_turn(
+                    &agent_id,
+                    &session.provider_session_id,
+                    &returned_session_id,
+                    &result.session_metadata,
+                )?;
+                let resource_status = if result
+                    .usage
+                    .used_percent
+                    .is_some_and(|value| value >= 100.0)
+                {
+                    ResourceStatus::RateLimited
+                } else if result.usage.used_percent.is_some_and(|value| value >= 90.0) {
+                    ResourceStatus::Low
+                } else {
+                    ResourceStatus::Available
+                };
+                self.store.upsert_resource(&ResourceState {
+                    agent_id: agent_id.clone(),
+                    status: resource_status,
+                    reset_at: result.usage.reset_at.clone(),
+                    details: serde_json::to_value(&result.usage)?,
+                    updated_at: chrono::Utc::now().to_rfc3339(),
+                })?;
+                let result = result.into_value();
                 self.store.mark_task_run(
                     &task.id,
                     &agent_id,
                     TaskRunStatus::Completed,
                     Some(&result),
                     Some(&agent.provider),
-                    Some(&session.provider_session_id),
+                    Some(&returned_session_id),
+                )?;
+                self.store.update_task_run_checkpoint(&task.id, &agent_id, &serde_json::json!({
+                    "execution_state":"completed","provider":agent.provider,"session_id":returned_session_id,
+                    "turn_id":result.get("turn_id"),"process_id":result.pointer("/provider_metadata/process_pid"),
+                    "worktree":agent.worktree,"ending_head":ending_head,
+                    "changed_files":result.get("changed_files"),"completed_at":chrono::Utc::now().to_rfc3339()
+                }))?;
+                self.events.publish(EventType::ProviderTurnCompleted, agent_id.clone(), None, Some(task.id.clone()),
+                    serde_json::json!({"provider":agent.provider,"session_id":returned_session_id,"turn_id":result.get("turn_id")}))?;
+                self.events.publish(
+                    EventType::UsageUpdated,
+                    agent_id.clone(),
+                    None,
+                    Some(task.id.clone()),
+                    result.get("usage").cloned().unwrap_or_default(),
                 )?;
                 self.events.publish(
                     EventType::TaskResultRecorded,
@@ -357,8 +500,65 @@ impl TaskEngine {
                     .transition(&agent_id, AgentStatus::Ready, None)?;
                 Ok(())
             }
-            Err(error) => {
-                let error = provider_failure(error, &agent_id);
+            Err(provider_error) => {
+                if provider_error == super::execution_provider::ProviderFailure::Cancelled {
+                    self.store.mark_task_run(
+                        &task.id,
+                        &agent_id,
+                        TaskRunStatus::Cancelled,
+                        None,
+                        Some(&agent.provider),
+                        Some(&session.provider_session_id),
+                    )?;
+                    self.agents
+                        .transition(&agent_id, AgentStatus::Ready, None)?;
+                    self.events.publish(
+                        EventType::ProviderTurnFailed,
+                        agent_id.clone(),
+                        None,
+                        Some(task.id.clone()),
+                        serde_json::json!({"cancelled":true}),
+                    )?;
+                    return Err(RuntimeError::Cancelled(task.id));
+                }
+                if provider_error.leaves_execution_unknown() {
+                    let changed_files =
+                        if let (Some(manager), Some(binding)) = (&self.worktrees, &binding) {
+                            manager.status(binding).unwrap_or_default()
+                        } else {
+                            vec![]
+                        };
+                    self.store.mark_task_run(
+                        &task.id,
+                        &agent_id,
+                        TaskRunStatus::UnknownAfterCrash,
+                        None,
+                        Some(&agent.provider),
+                        Some(&session.provider_session_id),
+                    )?;
+                    self.store.update_task_run_checkpoint(&task.id, &agent_id, &serde_json::json!({"execution_state":"unknown_after_crash","provider":agent.provider,
+                        "session_id":session.provider_session_id,"worktree":agent.worktree,"changed_files":changed_files,"failed_at":chrono::Utc::now().to_rfc3339()}))?;
+                    self.agents
+                        .transition(&agent_id, AgentStatus::Ready, None)?;
+                    self.events.publish(
+                        EventType::ProviderCrashDetected,
+                        agent_id.clone(),
+                        None,
+                        Some(task.id.clone()),
+                        serde_json::json!({"changed_files":changed_files}),
+                    )?;
+                    if !changed_files.is_empty() {
+                        self.events.publish(
+                            EventType::WorktreeDirty,
+                            agent_id.clone(),
+                            None,
+                            Some(task.id.clone()),
+                            serde_json::json!({"files":changed_files}),
+                        )?;
+                    }
+                    return Err(RuntimeError::UnknownAfterCrash(task.id));
+                }
+                let error = provider_failure(provider_error, &agent_id);
                 match &error {
                     RuntimeError::ResourceUnavailable {
                         status, reset_at, ..
@@ -423,6 +623,58 @@ impl TaskEngine {
                 Err(error)
             }
         }
+    }
+
+    pub async fn cancel(self: &Arc<Self>, task_id: &str, requested_by: &str) -> Result<Task> {
+        let task = self.required_task(task_id)?;
+        if matches!(task.status, TaskStatus::Completed | TaskStatus::Cancelled) {
+            return Ok(task);
+        }
+        self.events.publish(
+            EventType::TaskCancellationRequested,
+            requested_by,
+            None,
+            Some(task_id.into()),
+            serde_json::json!({}),
+        )?;
+        for agent_id in &task.assigned_to {
+            if let Some(session) = self.store.get_session(agent_id)? {
+                if let Some(agent) = self.agents.get(agent_id)? {
+                    let provider = self.sessions.provider_for(&agent)?;
+                    let _ = provider.cancel_turn(&session.provider_session_id).await;
+                }
+            }
+            if self
+                .store
+                .get_task_run(task_id, agent_id)?
+                .is_some_and(|run| run.status == TaskRunStatus::Running)
+            {
+                self.store.mark_task_run(
+                    task_id,
+                    agent_id,
+                    TaskRunStatus::Cancelled,
+                    None,
+                    None,
+                    None,
+                )?;
+            }
+            if self
+                .agents
+                .get(agent_id)?
+                .is_some_and(|agent| agent.status == AgentStatus::Running)
+            {
+                self.agents.transition(agent_id, AgentStatus::Ready, None)?;
+            }
+        }
+        self.set_status(task_id, TaskStatus::Cancelled)?;
+        self.events.publish(
+            EventType::TaskCancelled,
+            requested_by,
+            None,
+            Some(task_id.into()),
+            serde_json::json!({}),
+        )?;
+        self.required_task(task_id)
     }
 
     pub async fn approve_review(self: &Arc<Self>, task_id: &str, reviewer: &str) -> Result<Task> {

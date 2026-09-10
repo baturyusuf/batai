@@ -22,16 +22,20 @@ The Rust rewrite moves Batai from a Node-hosted control-plane prototype to a Tau
 - Content-hash/revision based task ingestion, protected terminal/running states and cycle-safe dependency evaluation.
 - Per-agent execution locks: one agent is serialized while different agents can execute concurrently.
 - Persistent per-agent task-run checkpoints, so successful members of a multi-agent task are not rerun after another member is rate-limited or after restart.
-- Provider-neutral execution/session traits and a deterministic mock provider for success, delay, failure, authentication and rate-limit tests.
+- Provider-neutral execution/session traits and normalized provider result/usage contracts.
+- Real Codex App Server, Claude Code CLI and Ollama HTTP execution adapters.
+- Structured process supervision with cancellation, timeouts, bounded/redacted diagnostics and conservative crash handling.
+- Automatic managed Git worktrees for coding roles and enriched per-run Git/process checkpoints.
 - Session persistence with provider/model/reasoning/worktree/config fingerprints.
 - Persistent resource states and SQLite-backed, deduplicated resource-recheck jobs with restart reconciliation.
 - Director review gate and deterministic downstream task activation.
 - Runtime-backed desktop snapshots for agent/task status and weighted progress.
 - Weighted project progress calculation.
 - Compatible GOD-to-Director message creation.
-- Provider-specific Codex, Claude Code, GitHub and Ollama probes under src-tauri/src/providers.
+- Provider-specific execution and diagnostic modules under `src-tauri/src/providers`.
 - Account connection guides for official authentication paths.
 - New three-column desktop UI with Overview, Workspace, Organization Map, Task Board, Accounts and Agent Inspector surfaces.
+- Push-based `batai://runtime-event` updates from Rust to the Tauri UI.
 
 ## Build
 
@@ -48,13 +52,12 @@ Requirements:
 
 The legacy Node runtime remains in the branch during protocol migration. It provides compatibility and regression tests until the Rust task, event, session and resource engines reach feature parity.
 
-The Rust suite currently contains 37 tests, including 31 runtime migration and recovery scenarios. GitHub Actions validates the Node compatibility suite on Linux and the Rust desktop suite on Windows.
+The Rust suite currently contains 53 tests. GitHub Actions validates the Node compatibility suite on Linux and formatting, linting, tests and the desktop build on Windows. Real-provider smoke tests remain explicitly opt-in.
 
 ## Remaining migration slices
 
-1. Connect the existing Codex, Claude Code and Ollama probes to the Rust execution trait and exercise authenticated session/resume behavior.
-2. Bind coding agents to worktrees automatically and reconcile real provider processes after crashes.
-3. Bridge the Rust event broadcast to Tauri window events for push-based UI refresh.
-4. Port authority, decision ledger, organizational memory and Git/GitHub lifecycle behavior.
-5. Add native project picker, terminal, diff and test panels.
-6. Remove the Node runtime only after real-provider and control-plane parity tests pass.
+1. Exercise Claude Code and Ollama against installed authenticated/local runtimes.
+2. Port authority, decision ledger, organizational memory and GitHub lifecycle behavior.
+3. Add native project picker, terminal, diff and test panels.
+4. Add an interactive GOD approval queue for provider escalation requests.
+5. Remove the Node runtime only after real-provider and control-plane parity tests pass.

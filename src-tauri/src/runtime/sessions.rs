@@ -37,7 +37,7 @@ impl SessionManager {
         if let Some(existing) = self.store.get_session(&agent.id)? {
             if existing.provider == agent.provider && existing.fingerprint == fingerprint {
                 provider
-                    .resume_session(&existing.provider_session_id, agent)
+                    .restore_session(&existing.provider_session_id, &existing.metadata, agent)
                     .await?;
                 return Ok(existing);
             }
@@ -57,6 +57,24 @@ impl SessionManager {
         };
         self.store.upsert_session(&session)?;
         Ok(session)
+    }
+
+    pub fn update_after_turn(
+        &self,
+        agent_id: &str,
+        expected_session_id: &str,
+        returned_session_id: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<()> {
+        if let Some(mut session) = self.store.get_session(agent_id)? {
+            if session.provider_session_id == expected_session_id {
+                session.provider_session_id = returned_session_id.to_owned();
+                session.metadata = metadata.clone();
+                session.updated_at = chrono::Utc::now().to_rfc3339();
+                self.store.upsert_session(&session)?;
+            }
+        }
+        Ok(())
     }
 }
 

@@ -5,6 +5,7 @@ const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;',
 const title = value => String(value ?? '').toLowerCase().replaceAll('_',' ').replace(/\b\w/g, c => c.toUpperCase());
 let snapshot = {project:{name:'Batai',progress:0,activeAgents:0,blockedTasks:0},agents:[],tasks:[]};
 let providers = [];
+let refreshTimer;
 
 function department(role = '') {
   const value = role.toLowerCase();
@@ -170,6 +171,18 @@ async function boot() {
     renderOrganization();
     renderTasks();
     renderProviders();
+    const listen = window.__TAURI__?.event?.listen;
+    if (listen) {
+      await listen('batai://runtime-event', () => {
+        clearTimeout(refreshTimer);
+        refreshTimer = setTimeout(async () => {
+          try {
+            snapshot = await loadSnapshot();
+            renderOverview(); renderOrganization(); renderTasks();
+          } catch (_) { /* the next durable event or manual refresh retries */ }
+        }, 80);
+      });
+    }
   } catch (error) {
     $('.runtime-state strong').textContent = 'Runtime offline';
     $('.runtime-state>i').style.background = 'var(--red)';

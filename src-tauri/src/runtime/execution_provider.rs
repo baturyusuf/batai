@@ -1,21 +1,112 @@
+use super::{
+    errors::{Result, RuntimeError},
+    types::{Agent, ResourceStatus, Task},
+};
+use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use async_trait::async_trait;
-use serde_json::Value;
-
-use super::{
-    errors::{Result, RuntimeError},
-    types::{Agent, ResourceStatus, Task},
-};
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProviderSession {
     pub id: String,
     pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    DirectMutation,
+    Patch,
+    ActionManifest,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderExecutionStatus {
+    Completed,
+    Interrupted,
+    Failed,
+    UnknownAfterCrash,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageSource {
+    Subscription,
+    Api,
+    Local,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageSnapshot {
+    pub source: UsageSource,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used_percent: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reset_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    #[serde(default)]
+    pub details: Value,
+}
+impl Default for UsageSnapshot {
+    fn default() -> Self {
+        Self {
+            source: UsageSource::Unknown,
+            input_tokens: None,
+            cached_input_tokens: None,
+            output_tokens: None,
+            used_percent: None,
+            reset_at: None,
+            cost: None,
+            currency: None,
+            details: Value::Null,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderExecutionResult {
+    pub provider: String,
+    pub model: String,
+    pub agent_id: String,
+    pub task_id: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub status: ProviderExecutionStatus,
+    pub summary: String,
+    #[serde(default)]
+    pub artifacts: Vec<String>,
+    #[serde(default)]
+    pub changed_files: Vec<String>,
+    pub usage: UsageSnapshot,
+    pub started_at: String,
+    pub completed_at: String,
+    pub execution_mode: ExecutionMode,
+    #[serde(default)]
+    pub provider_metadata: Value,
+    #[serde(default)]
+    pub session_metadata: Value,
+}
+impl ProviderExecutionResult {
+    pub fn into_value(self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,12 +116,23 @@ pub struct UsageState {
     pub details: Value,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ProviderFailure {
     RateLimited { reset_at: Option<String> },
     AuthRequired,
     Offline,
+    Cancelled,
+    Timeout,
+    ProcessCrash { message: String },
+    AppServerUnavailable(String),
+    UnsupportedVersion(String),
+    MalformedResponse(String),
     Execution(String),
+}
+impl ProviderFailure {
+    pub fn leaves_execution_unknown(&self) -> bool {
+        matches!(self, Self::Timeout | Self::ProcessCrash { .. })
+    }
 }
 
 #[async_trait]
@@ -38,12 +140,20 @@ pub trait ExecutionProvider: Send + Sync {
     fn name(&self) -> &str;
     async fn create_session(&self, agent: &Agent) -> Result<ProviderSession>;
     async fn resume_session(&self, session_id: &str, agent: &Agent) -> Result<ProviderSession>;
+    async fn restore_session(
+        &self,
+        session_id: &str,
+        _metadata: &Value,
+        agent: &Agent,
+    ) -> Result<ProviderSession> {
+        self.resume_session(session_id, agent).await
+    }
     async fn send_task(
         &self,
         session_id: &str,
         agent: &Agent,
         task: &Task,
-    ) -> std::result::Result<Value, ProviderFailure>;
+    ) -> std::result::Result<ProviderExecutionResult, ProviderFailure>;
     async fn cancel_turn(&self, _session_id: &str) -> Result<bool> {
         Ok(false)
     }
@@ -66,6 +176,8 @@ pub enum MockOutcome {
     Failure(String),
     RateLimited(Option<String>),
     AuthRequired,
+    Crash(String),
+    Cancelled,
 }
 
 #[derive(Clone, Default)]
@@ -75,7 +187,6 @@ pub struct MockProvider {
     calls: Arc<Mutex<Vec<(String, String)>>>,
     resumed: Arc<Mutex<Vec<String>>>,
 }
-
 impl MockProvider {
     pub fn push_outcome(&self, agent: &str, outcome: MockOutcome) {
         self.outcomes
@@ -139,7 +250,8 @@ impl ExecutionProvider for MockProvider {
         session_id: &str,
         agent: &Agent,
         task: &Task,
-    ) -> std::result::Result<Value, ProviderFailure> {
+    ) -> std::result::Result<ProviderExecutionResult, ProviderFailure> {
+        let started_at = chrono::Utc::now().to_rfc3339();
         self.calls
             .lock()
             .map_err(|_| ProviderFailure::Execution("mock lock".into()))?
@@ -159,10 +271,27 @@ impl ExecutionProvider for MockProvider {
                 return Err(ProviderFailure::RateLimited { reset_at })
             }
             MockOutcome::AuthRequired => return Err(ProviderFailure::AuthRequired),
+            MockOutcome::Crash(message) => return Err(ProviderFailure::ProcessCrash { message }),
+            MockOutcome::Cancelled => return Err(ProviderFailure::Cancelled),
         }
-        Ok(
-            serde_json::json!({"agent_id":agent.id,"task_id":task.id,"session_id":session_id,"summary":format!("Mock agent {} completed: {}",agent.id,task.objective)}),
-        )
+        Ok(ProviderExecutionResult {
+            provider: self.name().into(),
+            model: agent.model.clone(),
+            agent_id: agent.id.clone(),
+            task_id: task.id.clone(),
+            session_id: session_id.into(),
+            turn_id: Some(format!("TURN-{}", uuid::Uuid::new_v4())),
+            status: ProviderExecutionStatus::Completed,
+            summary: format!("Mock agent {} completed: {}", agent.id, task.objective),
+            artifacts: vec![],
+            changed_files: vec![],
+            usage: UsageSnapshot::default(),
+            started_at,
+            completed_at: chrono::Utc::now().to_rfc3339(),
+            execution_mode: ExecutionMode::DirectMutation,
+            provider_metadata: serde_json::json!({"mock":true}),
+            session_metadata: serde_json::json!({"mock":true}),
+        })
     }
     async fn get_usage_state(&self, agent: &Agent) -> Result<UsageState> {
         Ok(self
@@ -196,6 +325,12 @@ pub fn provider_failure(error: ProviderFailure, agent_id: &str) -> RuntimeError 
             status: "OFFLINE".into(),
             reset_at: None,
         },
-        ProviderFailure::Execution(message) => RuntimeError::Provider(message),
+        ProviderFailure::Cancelled => RuntimeError::Provider("provider turn cancelled".into()),
+        ProviderFailure::Timeout => RuntimeError::Provider("provider turn timed out".into()),
+        ProviderFailure::ProcessCrash { message }
+        | ProviderFailure::AppServerUnavailable(message)
+        | ProviderFailure::UnsupportedVersion(message)
+        | ProviderFailure::MalformedResponse(message)
+        | ProviderFailure::Execution(message) => RuntimeError::Provider(message),
     }
 }

@@ -66,18 +66,22 @@ Automated test suite: **23 passing tests** at the time of this snapshot.
 - Organization-first Overview and Organization Map.
 - Workspace, Task Board, Accounts and Agent Inspector surfaces.
 - Official connection guidance for Codex, Claude Code, GitHub and Ollama.
-- Thirty-seven passing Rust tests, including thirty-one runtime migration/recovery scenarios.
+- Real Codex App Server transport with initialize, thread start/resume, turn streaming, interruption, safe approval denial and subscription usage telemetry.
+- Supervised Claude Code JSON execution with named/resumable sessions, cancellation and normalized token/cost reporting.
+- Ollama chat/tag HTTP adapter with persisted conversation context and local token counters; private thinking is discarded.
+- Structured process supervision with bounded logs, timeout/cancellation, secret redaction and crash classification.
+- Automatic task-scoped Git worktrees for coding roles, safe reuse/removal, dirty-state inspection and durable execution checkpoints.
+- Conservative crash reconciliation: interrupted mutations become `UNKNOWN_AFTER_CRASH` and require review instead of automatic duplicate execution.
+- Push-based Tauri runtime events with debounced snapshot refresh in the desktop UI.
+- Fifty-three passing Rust tests, including an explicit opt-in authenticated Codex App Server smoke test.
 
 The Node HTTP control plane remains as a compatibility layer until the Rust task, event, session and resource engines reach feature parity.
 
 ## Next engineering milestones
 
-1. Install Codex CLI and exercise ChatGPT-authenticated sessions end-to-end.
-2. Install Claude Code and exercise authenticated session/resume behavior.
-3. Bind agent creation to persistent worktrees automatically when requested by policy.
-4. Add richer provider-specific quota telemetry/reset extraction.
-5. Add Agent-to-Agent meeting/message primitives on top of structured events.
-6. Run real GitHub issue → task → PR workflow with authenticated `gh`.
-7. Port remaining authority/memory/Git control-plane behavior, then remove the compatibility runtime after real-provider parity.
-8. Add native editor/LSP/terminal integration beyond the workspace scaffold.
-9. Add crash/reconciliation tests for concurrent real provider processes.
+1. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.
+2. Add Agent-to-Agent meeting/message primitives on top of structured events.
+3. Run real GitHub issue → task → PR workflow with authenticated `gh`.
+4. Port remaining authority and organizational-memory control-plane behavior, then remove the compatibility runtime after parity.
+5. Add native editor/LSP/terminal integration beyond the workspace scaffold.
+6. Add an interactive approval surface so selected provider requests can be reviewed by GOD instead of conservatively cancelled.

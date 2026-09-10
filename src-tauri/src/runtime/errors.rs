@@ -40,6 +40,10 @@ pub enum RuntimeError {
     InvalidTaskFile { path: PathBuf, message: String },
     #[error("runtime is shutting down")]
     ShuttingDown,
+    #[error("task cancelled: {0}")]
+    Cancelled(String),
+    #[error("provider stopped after possible repository mutation: {0}")]
+    UnknownAfterCrash(String),
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;

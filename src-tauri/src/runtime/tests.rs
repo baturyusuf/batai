@@ -451,7 +451,14 @@ async fn resource_rate_limit_parks_only_affected_agent() {
             .status,
         ResourceStatus::RateLimited
     );
-    assert!(h.store.get_resource("a").expect("resource").is_none());
+    assert_eq!(
+        h.store
+            .get_resource("a")
+            .expect("resource")
+            .expect("successful agent resource")
+            .status,
+        ResourceStatus::Available
+    );
 }
 
 #[tokio::test]
@@ -687,7 +694,7 @@ fn duplicate_resource_jobs_are_coalesced_per_agent() {
 }
 
 #[tokio::test]
-async fn interrupted_running_task_is_reconciled_and_resumed() {
+async fn interrupted_running_task_requires_review_instead_of_duplicate_execution() {
     let store = RuntimeStore::open_memory().expect("store");
     store
         .ingest_task(&task("t", &["a"], &[]), None, "hash")
@@ -701,6 +708,80 @@ async fn interrupted_running_task_is_reconciled_and_resumed() {
     h.engine.reconcile().await.expect("runtime reconcile");
     assert_eq!(
         h.store.get_task("t").expect("read").expect("task").status,
-        TaskStatus::Completed
+        TaskStatus::Review
     );
+}
+
+#[tokio::test]
+async fn cancellation_stops_a_running_turn_and_is_durable() {
+    let h = harness(RuntimeStore::open_memory().expect("store"));
+    register(&h, &["a"]);
+    h.mock
+        .push_outcome("a", MockOutcome::Delay(Duration::from_secs(2)));
+    let engine = h.engine.clone();
+    let execution =
+        tokio::spawn(async move { engine.ingest(task("cancel-me", &["a"], &[]), None).await });
+    wait_status(&h.store, "cancel-me", TaskStatus::Running).await;
+    h.engine.cancel("cancel-me", "user").await.expect("cancel");
+    execution.await.expect("worker").expect("dispatch result");
+    assert_eq!(
+        h.store.get_task("cancel-me").unwrap().unwrap().status,
+        TaskStatus::Cancelled
+    );
+    assert_eq!(
+        h.store
+            .get_task_run("cancel-me", "a")
+            .unwrap()
+            .unwrap()
+            .status,
+        TaskRunStatus::Cancelled
+    );
+    assert!(h
+        .store
+        .list_events(50)
+        .unwrap()
+        .iter()
+        .any(|event| event.event_type == EventType::TaskCancellationRequested));
+}
+
+#[tokio::test]
+async fn provider_crash_is_not_retried_when_execution_may_have_mutated_files() {
+    let h = harness(RuntimeStore::open_memory().expect("store"));
+    register(&h, &["a"]);
+    h.mock
+        .push_outcome("a", MockOutcome::Crash("fixture process exited".into()));
+    h.engine
+        .ingest(task("crash", &["a"], &[]), None)
+        .await
+        .expect("ingest");
+    assert_eq!(
+        h.store.get_task("crash").unwrap().unwrap().status,
+        TaskStatus::Review
+    );
+    let run = h.store.get_task_run("crash", "a").unwrap().unwrap();
+    assert_eq!(run.status, TaskRunStatus::UnknownAfterCrash);
+    assert_eq!(
+        run.checkpoint.unwrap()["execution_state"],
+        "unknown_after_crash"
+    );
+    assert_eq!(h.mock.calls_for("a"), 1);
+}
+
+#[tokio::test]
+async fn normalized_usage_is_persisted_after_success() {
+    let h = harness(RuntimeStore::open_memory().expect("store"));
+    register(&h, &["a"]);
+    h.engine
+        .ingest(task("usage", &["a"], &[]), None)
+        .await
+        .expect("ingest");
+    let resource = h.store.get_resource("a").unwrap().expect("resource state");
+    assert_eq!(resource.status, ResourceStatus::Available);
+    assert_eq!(resource.details["source"], "unknown");
+    assert!(h
+        .store
+        .list_events(50)
+        .unwrap()
+        .iter()
+        .any(|event| event.event_type == EventType::UsageUpdated));
 }

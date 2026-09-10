@@ -58,40 +58,77 @@ pub fn probe(id: &str, name: &str, kind: &str, status_args: &[&str]) -> Provider
     }
 }
 
+pub fn probe_codex() -> ProviderConnection {
+    let mut connection = probe("codex", "Codex", "Subscription", &["login", "status"]);
+    if connection.status == "connected" {
+        let capability = Command::new("codex")
+            .args(["app-server", "--help"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        if capability.is_ok_and(|status| status.success()) {
+            connection.detail = "Official CLI session and App Server are available".into();
+        } else {
+            connection.status = "action".into();
+            connection.status_label = "Update required".into();
+            connection.detail =
+                "Codex is connected, but this version does not expose App Server".into();
+        }
+    }
+    connection
+}
+
 pub fn local_provider(id: &str, name: &str, kind: &str) -> ProviderConnection {
     let installed = Command::new(id)
         .arg("--version")
         .stdin(Stdio::null())
         .output()
         .is_ok();
+    let online = installed
+        && Command::new(id)
+            .arg("list")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
     ProviderConnection {
         id: id.into(),
         name: name.into(),
         kind: kind.into(),
-        status: if installed { "local" } else { "unavailable" }.into(),
-        status_label: if installed {
+        status: if online {
+            "local"
+        } else if installed {
+            "action"
+        } else {
+            "unavailable"
+        }
+        .into(),
+        status_label: if online {
             "Local runtime"
+        } else if installed {
+            "Runtime offline"
         } else {
             "Not installed"
         }
         .into(),
-        account_label: if installed {
+        account_label: if online {
             "This computer"
+        } else if installed {
+            "Start Ollama"
         } else {
             "Setup required"
         }
         .into(),
-        detail: if installed {
+        detail: if online {
             "Local models can be used without an online account"
+        } else if installed {
+            "Ollama is installed but its local service is not responding"
         } else {
             "Install Ollama to use local models"
         }
         .into(),
-        action_label: if installed {
-            "View setup"
-        } else {
-            "Setup guide"
-        }
-        .into(),
+        action_label: if online { "View setup" } else { "Setup guide" }.into(),
     }
 }

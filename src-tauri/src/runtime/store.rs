@@ -294,11 +294,11 @@ impl RuntimeStore {
     }
 
     pub fn get_task_run(&self, task_id: &str, agent_id: &str) -> Result<Option<TaskRun>> {
-        self.db()?.query_row(r#"SELECT attempt,status,result_json,provider,provider_session_id,started_at,completed_at,updated_at
+        self.db()?.query_row(r#"SELECT attempt,status,result_json,provider,provider_session_id,started_at,completed_at,updated_at,checkpoint_json
           FROM task_runs WHERE task_id=? AND agent_id=?"#, params![task_id,agent_id], |row| Ok(TaskRun {
             task_id: task_id.into(), agent_id: agent_id.into(), attempt: row.get(0)?,
             status: parse_column(row.get::<_, String>(1)?)?, result: optional_json(row.get(2)?)?, provider: row.get(3)?,
-            provider_session_id: row.get(4)?, started_at: row.get(5)?, completed_at: row.get(6)?, updated_at: row.get(7)?,
+            provider_session_id: row.get(4)?, started_at: row.get(5)?, completed_at: row.get(6)?, updated_at: row.get(7)?, checkpoint: optional_json(row.get(8)?)?,
         })).optional().map_err(Into::into)
     }
 
@@ -355,6 +355,19 @@ impl RuntimeStore {
           params![task_id,agent_id,attempt,status.to_string(),result.map(serde_json::to_string).transpose()?,provider,session_id,started,completed,timestamp])?;
         self.get_task_run(task_id, agent_id)?
             .ok_or_else(|| RuntimeError::Provider("task run write failed".into()))
+    }
+
+    pub fn update_task_run_checkpoint(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        checkpoint: &Value,
+    ) -> Result<()> {
+        self.db()?.execute(
+            "UPDATE task_runs SET checkpoint_json=?,updated_at=? WHERE task_id=? AND agent_id=?",
+            params![serde_json::to_string(checkpoint)?, now(), task_id, agent_id],
+        )?;
+        Ok(())
     }
 
     pub fn schedule_resource_recheck(
@@ -448,12 +461,12 @@ impl RuntimeStore {
             [&timestamp],
         )?;
         self.db()?.execute(
-            "UPDATE tasks SET status='READY',updated_at=? WHERE status='RUNNING'",
+            "UPDATE tasks SET status='REVIEW',updated_at=? WHERE status='RUNNING'",
             [&timestamp],
         )?;
         self.db()?.execute(
-            "UPDATE task_runs SET status='PENDING',updated_at=? WHERE status='RUNNING'",
-            [&timestamp],
+            "UPDATE task_runs SET status='UNKNOWN_AFTER_CRASH',checkpoint_json=json_object('execution_state','unknown_after_crash','reconciled_at',?),updated_at=? WHERE status='RUNNING'",
+            [&timestamp, &timestamp],
         )?;
         self.db()?.execute("UPDATE agents SET status='READY',current_task_id=NULL,updated_at=? WHERE status='RUNNING'", [&timestamp])?;
         Ok(())
