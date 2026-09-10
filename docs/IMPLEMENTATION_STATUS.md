@@ -22,8 +22,9 @@
 - Ollama provider adapter
 - Quota reset parser
 - Web control plane
+- HTTP control-plane validation for malformed JSON and invalid payloads
 
-Automated test suite: **19 passing tests** at the time of this snapshot.
+Automated test suite: **23 passing tests** at the time of this snapshot.
 
 ## Implemented and smoke-tested at protocol/process level
 

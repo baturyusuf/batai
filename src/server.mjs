@@ -32,7 +32,13 @@ async function readJson(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
   if (!chunks.length) return {};
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    const error = new Error('Request body must contain valid JSON');
+    error.name = 'InvalidJson';
+    throw error;
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -97,7 +103,8 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'content-type': `${type}; charset=utf-8` });
     fs.createReadStream(file).pipe(res);
   } catch (error) {
-    json(res, error.name === 'ValidationError' ? 400 : 500, { error: error.name, message: error.message, details: error.details });
+    const clientError = error.name === 'ValidationError' || error.name === 'InvalidJson';
+    json(res, clientError ? 400 : 500, { error: error.name, message: error.message, details: error.details });
   }
 });
 

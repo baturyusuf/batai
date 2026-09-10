@@ -1,3 +1,5 @@
+import { authModeForProvider } from './provider-auth.js';
+
 const el = id => document.getElementById(id);
 
 async function api(url, options = {}) {
@@ -94,11 +96,12 @@ async function refresh() {
 
 el('create-agent').addEventListener('click', async () => {
   const id = el('agent-id').value.trim();
+  const provider = el('agent-provider').value;
   try {
     await api('/api/agents', { method:'POST', body:JSON.stringify({
       id, name:el('agent-name').value.trim() || id, role_template:el('agent-role').value.trim() || 'SoftwareEngineer',
-      parent_agent_id:'director', provider:el('agent-provider').value, model:el('agent-model').value.trim(), reasoning_effort:el('agent-reasoning').value,
-      auth_mode:'local', worktree:null, allowed_paths:['**/*'], tools:['git','shell'], constraints:['Do not contact customer'],
+      parent_agent_id:'director', provider, model:el('agent-model').value.trim(), reasoning_effort:el('agent-reasoning').value,
+      auth_mode:authModeForProvider(provider), worktree:null, allowed_paths:['**/*'], tools:['git','shell'], constraints:['Do not contact customer'],
       max_turns:18, lifetime:'project', status:'READY'
     }) });
     el('agent-form-message').textContent = `Created ${id}`;
