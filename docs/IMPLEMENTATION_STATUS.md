@@ -53,11 +53,16 @@ Automated test suite: **23 passing tests** at the time of this snapshot.
 - issue creation/read
 - pull-request creation
 
-## Scaffolded, not compiled in this environment
+## Rust and Tauri rewrite branch
 
-- Tauri 2 desktop shell (`src-tauri/`)
+- Tauri 2 desktop executable compiles on Windows.
+- Rust project-state, weighted-progress and provider-connection modules.
+- Organization-first Overview and Organization Map.
+- Workspace, Task Board, Accounts and Agent Inspector surfaces.
+- Official connection guidance for Codex, Claude Code, GitHub and Ollama.
+- Six passing Rust unit tests.
 
-Rust/Cargo is not installed in the current build environment. The working user surface in this snapshot is the Node HTTP control plane; the Tauri shell is source-only.
+The Node HTTP control plane remains as a compatibility layer until the Rust task, event, session and resource engines reach feature parity.
 
 ## Next engineering milestones
 
@@ -67,6 +72,6 @@ Rust/Cargo is not installed in the current build environment. The working user s
 4. Add richer provider-specific quota telemetry/reset extraction.
 5. Add Agent-to-Agent meeting/message primitives on top of structured events.
 6. Run real GitHub issue → task → PR workflow with authenticated `gh`.
-7. Compile Tauri shell and bridge Tauri commands to the runtime.
-8. Add editor/LSP/terminal integration beyond the control-plane UI.
+7. Complete the Rust task/event/session/resource migration and remove the compatibility runtime.
+8. Add native editor/LSP/terminal integration beyond the workspace scaffold.
 9. Add crash/reconciliation tests for concurrent real provider processes.

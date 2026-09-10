@@ -12,10 +12,14 @@
         "title": "Batai",
         "width": 1440,
         "height": 900,
+        "minWidth": 1100,
+        "minHeight": 720,
         "resizable": true
       }
     ],
-    "security": { "csp": null }
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
   },
   "bundle": { "active": true, "targets": "all" }
 }

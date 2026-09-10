@@ -2,6 +2,8 @@
 
 **Batai** is a Director-managed, cost-aware runtime for heterogeneous AI developer teams.
 
+> The `codex/rust-rewrite` branch contains the new Rust/Tauri desktop foundation and organization-first interface. The Node control plane remains temporarily as a compatibility layer while runtime modules are migrated.
+
 The core idea is that the **Director AI operates the organization through Batai tools**. Batai itself stays deterministic wherever possible: task routing, dependencies, events, worktrees, quota waiting, session recovery and authority state should not spend LLM turns.
 
 ## Implemented MVP
@@ -47,6 +49,18 @@ http://127.0.0.1:4317
 ```
 
 The core currently has no npm runtime dependencies; it uses Node built-ins, including Node 22 SQLite.
+
+## Run the Rust desktop
+
+Requires the Rust stable toolchain, WebView2 and Visual Studio Build Tools with the C++ desktop workload on Windows.
+
+
+```bash
+npm run test:all
+npm run desktop:dev
+```
+
+The Rust desktop reads the existing `.batai` repository contract, shows agents by organizational role, exposes weighted task progress and checks official Codex, Claude Code, GitHub and Ollama connection states without storing raw credentials.
 
 ## Director MCP server
 

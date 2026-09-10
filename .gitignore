@@ -7,4 +7,5 @@ node_modules/
 *.sqlite-wal
 target/
 src-tauri/target/
+src-tauri/gen/
 dist/

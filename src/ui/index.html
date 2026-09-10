@@ -1,90 +1,70 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Batai Control Plane</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="dark">
+  <title>Batai Workspace</title>
+  <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <header class="topbar">
-    <div>
-      <h1>Batai</h1>
-      <p>Director-managed AI developer organization runtime</p>
-    </div>
-    <div id="health" class="status-pill">connecting</div>
-  </header>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand" data-tauri-drag-region><div class="brand-mark">B</div><div><strong>Batai</strong><span>Organization runtime</span></div></div>
+      <button class="project-switcher"><span class="project-icon">⌘</span><span><strong id="project-name">Loading project</strong><small>codex/rust-rewrite</small></span><span>⌄</span></button>
+      <nav class="nav">
+        <p>Project</p>
+        <button class="nav-item active" data-view="overview"><span>⌂</span>Overview</button>
+        <button class="nav-item" data-view="workspace"><span>⌘</span>Workspace</button>
+        <button class="nav-item" data-view="organization"><span>⌁</span>Organization Map</button>
+        <button class="nav-item" data-view="tasks"><span>✓</span>Tasks <b id="task-nav-count">0</b></button>
+        <button class="nav-item" data-view="decisions"><span>◇</span>Decisions</button>
+        <p>System</p>
+        <button class="nav-item" data-view="accounts"><span>◎</span>Accounts <i id="account-alert"></i></button>
+        <button class="nav-item" data-view="resources"><span>◫</span>Resources</button>
+        <button class="nav-item" data-view="settings"><span>⚙</span>Settings</button>
+      </nav>
+      <div class="sidebar-footer"><div class="runtime-state"><i></i><span><strong>Runtime online</strong><small>Rust control plane</small></span></div><button id="open-accounts" class="account-cta">＋ Connect an account</button></div>
+    </aside>
 
-  <main>
-    <section class="hero-grid">
-      <article class="panel director-panel">
-        <div class="panel-title"><h2>Director Control</h2><span class="badge">GOD → Director</span></div>
-        <p class="muted">The MVP exposes Director tools directly. Real LLM adapters plug into this control plane later.</p>
-        <div class="form-grid">
-          <input id="agent-id" placeholder="agent id (e.g. backend-02)" />
-          <input id="agent-name" placeholder="agent name" />
-          <input id="agent-role" placeholder="role template" value="SoftwareEngineer" />
-          <select id="agent-provider"><option value="mock">mock</option><option value="codex-cli">Codex CLI</option><option value="claude-cli">Claude Code</option><option value="ollama">Ollama local</option></select>
-          <input id="agent-model" placeholder="model (e.g. sonnet / gpt-5.5 / qwen3:14b)" value="mock-medium" />
-          <select id="agent-reasoning"><option>low</option><option selected>medium</option><option>high</option><option>extra_high</option></select>
-          <button id="create-agent">Create mock agent</button>
-        </div>
-        <div id="agent-form-message" class="message"></div>
-      </article>
+    <main class="main-area">
+      <header class="topbar" data-tauri-drag-region><div class="breadcrumbs"><span id="crumb-project">Batai</span><b>/</b><strong id="crumb-view">Overview</strong></div><div class="top-actions"><button class="icon-button">⌕</button><button class="icon-button">◌</button><button class="primary-button">＋ New task</button></div></header>
+      <div class="content-scroll">
+        <section class="view active" id="view-overview">
+          <div class="hero-row"><div><p class="eyebrow">PROJECT CONTROL PLANE</p><h1>Good morning, Yusuf</h1><p class="lede">Your AI software organization is ready. Director coordinates the work; you keep final authority.</p></div><div class="segmented"><button class="active">Hierarchy</button><button>Workflow</button></div></div>
+          <div class="metrics">
+            <article><span>Project progress</span><strong id="metric-progress">0%</strong><div class="progress"><i id="progress-bar"></i></div><small>Weighted by task importance</small></article>
+            <article><span>Active agents</span><strong id="metric-agents">0</strong><small id="agent-summary">No agents running</small></article>
+            <article><span>Tasks in motion</span><strong id="metric-tasks">0</strong><small id="task-summary">No blockers</small></article>
+            <article><span>Provider health</span><strong id="metric-providers">—</strong><small id="provider-summary">Checking accounts</small></article>
+          </div>
+          <section class="panel org-panel"><div class="panel-heading"><div><p class="eyebrow">LIVE ORGANIZATION</p><h2>Who is doing what</h2></div><button class="quiet-button" data-view-link="organization">Open full map ↗</button></div><div id="organization-preview" class="organization-preview"><div class="skeleton"></div></div></section>
+          <div class="two-column"><section class="panel"><div class="panel-heading"><div><p class="eyebrow">DELIVERY</p><h2>Tasks in motion</h2></div><button class="quiet-button" data-view-link="tasks">View board</button></div><div id="task-list"></div></section><section class="panel"><div class="panel-heading"><div><p class="eyebrow">CAPACITY</p><h2>Connected intelligence</h2></div><button class="quiet-button" data-view-link="accounts">Manage</button></div><div id="provider-mini-list"></div></section></div>
+        </section>
 
-      <article class="panel">
-        <div class="panel-title"><h2>Assign Task</h2><span class="badge">event-driven</span></div>
-        <div class="form-grid">
-          <input id="task-id" placeholder="TASK-001" />
-          <input id="task-agent" placeholder="agent id" />
-          <textarea id="task-objective" placeholder="Objective"></textarea>
-          <input id="task-deps" placeholder="dependencies, comma separated" />
-          <label class="check"><input id="task-review" type="checkbox" /> Director review required</label>
-          <button id="create-task">Write task JSON</button>
-        </div>
-        <div id="task-form-message" class="message"></div>
-      </article>
-    </section>
+        <section class="view" id="view-workspace"><div class="section-title"><div><p class="eyebrow">BUILD SURFACE</p><h1>Workspace</h1><p>Files, changes, tests and agent activity stay in one place.</p></div><button class="primary-button">Open terminal</button></div><div class="workspace-grid"><section class="panel file-panel"><div class="panel-heading"><h2>Project files</h2><span class="badge">Git</span></div><div class="file-tree"><p>⌄ src-tauri</p><span>⌄ src</span><span class="active">◇ main.rs</span><span>◇ domain.rs</span><span>◇ project.rs</span><p>⌄ src/ui</p><span>◇ index.html</span><span>◇ styles.css</span><span>◇ app.js</span></div></section><section class="panel editor-panel"><div class="editor-tabs"><span class="active">main.rs ×</span><span>domain.rs ×</span></div><pre><code><em>1</em> <u>mod</u> domain;
+<em>2</em> <u>mod</u> project;
+<em>3</em> <u>mod</u> providers;
+<em>4</em>
+<em>5</em> <u>fn</u> <strong>main</strong>() {
+<em>6</em>   tauri::Builder::default()
+<em>7</em>     .manage(AppState::new())
+<em>8</em>     .run(tauri::generate_context!());
+<em>9</em> }</code></pre><div class="bottom-console"><strong>Tests</strong><span>Terminal</span><span>Events</span><p>● Rust test suite ready</p></div></section></div></section>
 
-    <section class="hero-grid">
-      <article class="panel god-panel">
-        <div class="panel-title"><h2>GOD Console</h2><span class="badge authority">authority 100</span></div>
-        <p class="muted">Send a project, global or task-scoped instruction to Director. It is persisted in the Director inbox.</p>
-        <div class="form-grid">
-          <select id="god-scope"><option value="project">project policy</option><option value="task">task instruction</option><option value="global">global policy</option></select>
-          <textarea id="god-message" placeholder="Director'a doğal dil ile müdahale et..."></textarea>
-          <button id="send-god-message">Send to Director</button>
-        </div>
-        <div id="god-form-message" class="message"></div>
-        <div id="director-inbox" class="compact-list"></div>
-      </article>
+        <section class="view" id="view-organization"><div class="section-title"><div><p class="eyebrow">ORGANIZATION FIRST</p><h1>Organization Map</h1><p>Authority, responsibility and active work—not a wall of model names.</p></div><div class="segmented"><button class="active">Hierarchy</button><button>Workflow</button><button>Combined</button></div></div><section class="panel map-panel"><div class="map-toolbar"><button>Fit</button><button>−</button><span>100%</span><button>＋</button><input placeholder="Search agents or tasks"></div><div id="organization-map" class="organization-map"></div></section></section>
+        <section class="view" id="view-tasks"><div class="section-title"><div><p class="eyebrow">DETERMINISTIC WORKFLOW</p><h1>Task Board</h1><p>Dependencies and state changes move work without coordination chatter.</p></div><button class="primary-button">＋ Create task</button></div><div id="task-board" class="task-board"></div></section>
+        <section class="view" id="view-accounts"><div class="section-title"><div><p class="eyebrow">INTELLIGENCE SOURCES</p><h1>Accounts and providers</h1><p>Connect official accounts and local runtimes. Batai never stores your raw credentials.</p></div><button class="quiet-button" id="refresh-providers">↻ Check all</button></div><div class="account-explainer"><div>✓</div><p><strong>Your accounts stay with each provider</strong><br>Authentication happens through official CLI or local runtime flows. Batai reads connection status and quota metadata only.</p></div><div id="provider-grid" class="provider-grid"></div></section>
+        <section class="view placeholder-view" id="view-decisions"><span>◇</span><h1>Decision Ledger</h1><p>Locked GOD decisions and Director recommendations will appear here.</p></section>
+        <section class="view placeholder-view" id="view-resources"><span>◫</span><h1>Resource Dashboard</h1><p>Subscription quota, local compute and PAYG capacity will appear here.</p></section>
+        <section class="view placeholder-view" id="view-settings"><span>⚙</span><h1>Settings</h1><p>Project policy, permissions and runtime preferences will appear here.</p></section>
+      </div>
+    </main>
 
-      <article class="panel">
-        <div class="panel-title"><h2>Decision Ledger</h2><span id="decision-count" class="badge">0 decisions</span></div>
-        <div id="decisions" class="compact-list"></div>
-      </article>
-    </section>
+    <aside class="inspector"><div class="inspector-tabs"><button class="active">Director</button><button>Inspector</button><button>Activity</button></div><div class="director-profile"><div class="avatar director">D</div><div><strong>Director</strong><span><i></i> Ready to coordinate</span></div><button>•••</button></div><div class="chat" id="chat-log"><div class="chat-date">TODAY</div><div class="message"><div class="avatar director">D</div><div><strong>Director</strong><p>I have the project context. Tell me the outcome you want; I’ll organize the right team and bring important decisions back to you.</p><small>Organization context loaded</small></div></div></div><div class="quick-prompts"><button>Review project status</button><button>Plan the next milestone</button></div><form id="director-form" class="composer"><textarea id="director-input" rows="3" placeholder="Message Director…"></textarea><div><button type="button">＋</button><span>GOD authority</span><button type="submit" class="send-button">↑</button></div></form></aside>
+  </div>
 
-    <section class="panel">
-      <div class="panel-title"><h2>Provider Capacity</h2><span class="badge">subscription / local / CLI</span></div>
-      <div id="providers" class="cards"></div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-title"><h2>Organization</h2><span id="agent-count" class="badge">0 agents</span></div>
-      <div id="agents" class="cards"></div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-title"><h2>Task Board</h2><span id="task-count" class="badge">0 tasks</span></div>
-      <div id="tasks" class="task-grid"></div>
-    </section>
-
-    <section class="panel">
-      <div class="panel-title"><h2>Event Stream</h2><span class="badge">no LLM coordination</span></div>
-      <div id="events" class="events"></div>
-    </section>
-  </main>
+  <dialog id="connection-dialog"><form method="dialog" class="dialog-card"><button class="dialog-close" value="cancel">×</button><div class="dialog-icon">◎</div><p class="eyebrow">OFFICIAL CONNECTION FLOW</p><h2 id="dialog-title">Connect account</h2><p id="dialog-description"></p><ol id="dialog-steps"></ol><div id="dialog-command" class="command-box"></div><div class="dialog-actions"><button value="cancel" class="quiet-button">Close</button><button value="cancel" id="copy-command" class="primary-button">Copy command</button></div></form></dialog>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

@@ -1,140 +1,206 @@
-import { authModeForProvider } from './provider-auth.js';
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const invoke = window.__TAURI__?.core?.invoke;
+const esc = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+const title = value => String(value ?? '').toLowerCase().replaceAll('_',' ').replace(/\b\w/g, c => c.toUpperCase());
+let snapshot = {project:{name:'Batai',progress:0,activeAgents:0,blockedTasks:0},agents:[],tasks:[]};
+let providers = [];
 
-const el = id => document.getElementById(id);
-
-async function api(url, options = {}) {
-  const response = await fetch(url, { headers: { 'content-type': 'application/json' }, ...options });
-  const body = await response.json();
-  if (!response.ok) throw new Error(body.details?.join?.(', ') || body.message || 'Request failed');
-  return body;
+function department(role = '') {
+  const value = role.toLowerCase();
+  if (value.includes('director') || value.includes('product')) return 'Leadership';
+  if (value.includes('review') || value.includes('qa') || value.includes('test')) return 'Quality';
+  if (value.includes('design') || value.includes('frontend')) return 'Product Design';
+  return 'Engineering';
 }
 
-function esc(value) {
-  return String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
+async function loadSnapshot() {
+  if (invoke) return invoke('get_app_snapshot');
+  const response = await fetch('/api/state');
+  if (!response.ok) throw new Error('Control plane is offline');
+  const state = await response.json();
+  const tasks = (state.tasks ?? []).map(task => ({
+    id:task.id, objective:task.objective, status:task.status,
+    assignedTo:task.assigned_to ?? [], dependencies:task.dependencies ?? [],
+    weight:task.weight ?? 1,
+    progress:task.progress ?? ({COMPLETED:1,REVIEW:.9,RUNNING:.55,WAITING_RESOURCE:.4,BLOCKED:.25}[task.status] ?? 0)
+  }));
+  const agents = (state.agents ?? []).map(agent => ({
+    id:agent.id, name:agent.name, title:agent.role_template,
+    department:department(agent.role_template), reportsTo:agent.parent_agent_id,
+    provider:agent.provider, model:agent.model, authMode:agent.auth_mode,
+    status:agent.status, currentTaskId:agent.current_task_id, worktree:agent.worktree
+  }));
+  const total = tasks.reduce((sum, task) => sum + task.weight, 0);
+  const progress = total ? Math.round(tasks.reduce((sum, task) => sum + task.weight * task.progress, 0) / total * 1000) / 10 : 0;
+  return {project:{name:'batai',progress,activeAgents:agents.filter(a => ['READY','RUNNING'].includes(a.status)).length,blockedTasks:tasks.filter(t => t.status === 'BLOCKED').length},agents,tasks};
 }
 
-function renderAgents(agents, resources) {
-  const resourceMap = new Map(resources.map(r => [r.agentId, r]));
-  el('agent-count').textContent = `${agents.length} agents`;
-  el('agents').innerHTML = agents.map(a => {
-    const resource = resourceMap.get(a.id);
-    return `<article class="agent-card">
-      <div class="head"><strong>${esc(a.name)}</strong><span><i class="dot ${esc(a.status)}"></i> ${esc(a.status)}</span></div>
-      <dl><dt>ID</dt><dd>${esc(a.id)}</dd><dt>Role</dt><dd>${esc(a.role_template)}</dd><dt>Provider</dt><dd>${esc(a.provider)}</dd><dt>Model</dt><dd>${esc(a.model)}</dd><dt>Reasoning</dt><dd>${esc(a.reasoning_effort)}</dd><dt>Resource</dt><dd>${esc(resource?.status ?? 'UNKNOWN')}</dd><dt>Task</dt><dd>${esc(a.current_task_id ?? '—')}</dd></dl>
-    </article>`;
-  }).join('') || '<p class="muted">No agents yet.</p>';
-}
-
-
-function renderProviders(providers) {
-  el('providers').innerHTML = providers.map(p => `<article class="agent-card">
-    <div class="head"><strong>${esc(p.name)}</strong><span><i class="dot ${esc(p.usage?.status === 'AVAILABLE' ? 'READY' : p.usage?.status)}"></i> ${esc(p.usage?.status ?? 'UNKNOWN')}</span></div>
-    <dl><dt>Models</dt><dd>${esc((p.models ?? []).join(', ') || 'dynamic / unavailable')}</dd><dt>Reset</dt><dd>${esc(p.usage?.resetAt ?? '—')}</dd></dl>
-  </article>`).join('');
-}
-
-async function refreshProviders() {
-  try { renderProviders(await api('/api/providers')); } catch { renderProviders([]); }
-}
-
-
-function renderInbox(messages = []) {
-  const pending = messages.filter(m => m.status === 'PENDING');
-  el('director-inbox').innerHTML = pending.slice(0,8).map(m => `<div class="list-row"><strong>${esc(m.scope)}</strong><span>${esc(m.content)}</span><small>${esc(new Date(m.timestamp).toLocaleString())}</small></div>`).join('') || '<p class="muted">No pending GOD instructions.</p>';
-}
-
-function renderDecisions(decisions = []) {
-  el('decision-count').textContent = `${decisions.length} decisions`;
-  el('decisions').innerHTML = decisions.slice(0,20).map(d => `<article class="decision-row">
-    <div><strong>${esc(d.topic)}</strong><span class="badge">${esc(d.status)}</span></div>
-    <p>${esc(d.question)}</p>
-    <small>Recommended: ${esc(typeof d.director_recommendation === 'string' ? d.director_recommendation : JSON.stringify(d.director_recommendation))}</small>
-    ${d.status === 'OPEN' && d.requires === 'GOD' ? `<div class="decision-actions"><input data-decision-value="${esc(d.id)}" placeholder="GOD decision"/><button data-resolve-decision="${esc(d.id)}">Resolve</button></div>` : `<small>Effective: ${esc(typeof d.effective_decision === 'string' ? d.effective_decision : JSON.stringify(d.effective_decision))}</small>`}
-  </article>`).join('') || '<p class="muted">No decisions yet.</p>';
-  document.querySelectorAll('[data-resolve-decision]').forEach(button => button.addEventListener('click', async () => {
-    const id = button.dataset.resolveDecision;
-    const input = document.querySelector(`[data-decision-value="${CSS.escape(id)}"]`);
-    if (!input.value.trim()) return;
-    await api(`/api/decisions/${encodeURIComponent(id)}/resolve`, {method:'POST',body:JSON.stringify({value:input.value.trim()})});
-    await refresh();
+async function loadProviders() {
+  if (invoke) return invoke('get_provider_connections');
+  const response = await fetch('/api/providers');
+  if (!response.ok) return [];
+  return (await response.json()).map(item => ({
+    id:item.name === 'codex-cli' ? 'codex' : item.name === 'claude-cli' ? 'claude' : item.name,
+    name:{'codex-cli':'Codex','claude-cli':'Claude Code',ollama:'Ollama',mock:'Mock Runtime'}[item.name] ?? item.name,
+    kind:item.name === 'ollama' ? 'Local runtime' : item.name === 'mock' ? 'Development' : 'Subscription',
+    status:item.usage?.status === 'AVAILABLE' ? 'connected' : 'unavailable',
+    statusLabel:title(item.usage?.status ?? 'Unknown'),
+    accountLabel:item.usage?.status === 'AVAILABLE' ? 'Available on this computer' : 'Setup required',
+    detail:(item.models ?? []).join(', ') || 'Models detected dynamically',
+    actionLabel:'Connection guide'
   }));
 }
 
-function renderTasks(tasks) {
-  el('task-count').textContent = `${tasks.length} tasks`;
-  el('tasks').innerHTML = tasks.map(t => `<article class="task ${esc(t.status)}">
-    <div class="panel-title"><strong>${esc(t.id)}</strong><span class="badge">${esc(t.status)}</span></div>
-    <p>${esc(t.objective)}</p>
-    <div class="meta">Agents: ${esc((t.assigned_to ?? []).join(', '))}<br>Dependencies: ${esc((t.dependencies ?? []).join(', ') || 'none')}</div>
-    ${t.status === 'REVIEW' ? `<button data-approve="${esc(t.id)}">Director approve</button>` : ''}
-  </article>`).join('') || '<p class="muted">No tasks yet.</p>';
-  document.querySelectorAll('[data-approve]').forEach(button => button.addEventListener('click', async () => {
-    await api(`/api/tasks/${encodeURIComponent(button.dataset.approve)}/approve`, { method:'POST', body:'{}' });
-    await refresh();
-  }));
+function initials(agent) {
+  return (agent.name || agent.title || '?').split(/\s+/).slice(0,2).map(w => w[0]).join('').toUpperCase();
 }
 
-function renderEvents(events) {
-  el('events').innerHTML = events.slice(0, 100).map(e => `<div class="event">
-    <span>${esc(new Date(e.timestamp).toLocaleString())}</span><span class="type">${esc(e.type)}</span><span>${esc(e.source)} → ${esc(e.target ?? '—')}</span><span>${esc(e.task_id ?? '')}</span>
-  </div>`).join('') || '<p class="muted">No events yet.</p>';
+function agentNode(agent) {
+  const kind = agent.id === 'director' ? ' director' : agent.department === 'Quality' ? ' quality' : '';
+  return '<article class="agent-node" data-agent-id="' + esc(agent.id) + '"><div class="node-head">' +
+    '<div class="avatar' + kind + '">' + esc(initials(agent)) + '</div><div><strong>' + esc(agent.name) +
+    '</strong><small>' + esc(agent.title) + '</small></div></div><footer><span class="status"><i></i>' +
+    esc(title(agent.status)) + '</span><small class="model-badge">' + esc(agent.model || 'Auto') + '</small></footer></article>';
 }
 
-async function refresh() {
+function renderOverview() {
+  $('#project-name').textContent = snapshot.project.name;
+  $('#crumb-project').textContent = snapshot.project.name;
+  $('#metric-progress').textContent = snapshot.project.progress + '%';
+  $('#progress-bar').style.width = snapshot.project.progress + '%';
+  $('#metric-agents').textContent = snapshot.project.activeAgents;
+  $('#agent-summary').textContent = snapshot.agents.length + ' people in the organization';
+  const moving = snapshot.tasks.filter(t => ['RUNNING','REVIEW','WAITING_RESOURCE','BLOCKED'].includes(t.status)).length;
+  $('#metric-tasks').textContent = moving;
+  $('#task-summary').textContent = snapshot.project.blockedTasks ? snapshot.project.blockedTasks + ' blocked' : 'No blockers';
+  $('#task-nav-count').textContent = snapshot.tasks.length;
+  const connected = providers.filter(p => ['connected','local'].includes(p.status)).length;
+  $('#metric-providers').textContent = connected + '/' + (providers.length || '—');
+  $('#provider-summary').textContent = connected ? 'Official sessions detected' : 'Connect an intelligence source';
+  const director = snapshot.agents.find(a => a.id === 'director');
+  const workers = snapshot.agents.filter(a => a.id !== 'director').slice(0,4);
+  $('#organization-preview').innerHTML = snapshot.agents.length ? (director ? agentNode(director) : '') + workers.map(agentNode).join('') : '<p class="empty">Create your first project team.</p>';
+  $('#task-list').innerHTML = snapshot.tasks.slice(0,5).map(t => '<div class="task-row"><i></i><div><strong>' + esc(t.objective) + '</strong><small>' + esc(t.assignedTo.join(', ') || 'Unassigned') + '</small></div><b>' + esc(title(t.status)) + '</b></div>').join('') || '<p class="empty">No tasks yet. Ask Director to plan the first milestone.</p>';
+  $('#provider-mini-list').innerHTML = providers.slice(0,4).map(p => '<div class="provider-mini"><div><strong>' + esc(p.name) + '</strong><small>' + esc(p.kind) + '</small></div><span class="connection-dot ' + esc(p.status) + '">' + esc(p.statusLabel) + '</span></div>').join('');
+  bindAgents();
+}
+
+function renderOrganization() {
+  const groups = snapshot.agents.reduce((all, agent) => {
+    (all[agent.department] ??= []).push(agent);
+    return all;
+  }, {});
+  $('#organization-map').innerHTML = Object.entries(groups).map(([name, agents]) =>
+    '<section class="department-column"><span class="department-label">' + esc(name) + '</span>' +
+    agents.map(agentNode).join('') + '</section>'
+  ).join('') || '<p class="empty">The organization is empty.</p>';
+  bindAgents();
+}
+
+function renderTasks() {
+  const columns = [['Backlog',['PENDING','READY']],['In progress',['RUNNING','WAITING_RESOURCE','BLOCKED']],['Review',['REVIEW']],['Completed',['COMPLETED']]];
+  $('#task-board').innerHTML = columns.map(([name, statuses]) => {
+    const tasks = snapshot.tasks.filter(task => statuses.includes(task.status));
+    return '<section class="task-column"><header><span>' + name + '</span><b>' + tasks.length + '</b></header>' +
+      tasks.map(task => '<article class="task-card"><strong>' + esc(task.id) + '</strong><p>' + esc(task.objective) +
+      '</p><footer><span>' + esc(title(task.status)) + '</span><span>' + esc(task.assignedTo[0] ?? 'Unassigned') + '</span></footer></article>').join('') + '</section>';
+  }).join('');
+}
+
+function renderProviders() {
+  const logos = {codex:'◎',claude:'A',gh:'⌘',ollama:'◉',mock:'M'};
+  $('#provider-grid').innerHTML = providers.map(p =>
+    '<article class="provider-card"><div class="provider-head"><div class="provider-logo">' + esc(logos[p.id] ?? p.name[0]) +
+    '</div><div><strong>' + esc(p.name) + '</strong><span>' + esc(p.kind) + '</span></div><span class="provider-status ' +
+    esc(p.status) + '">' + esc(p.statusLabel) + '</span></div><div class="provider-detail"><span>Account</span><strong>' +
+    esc(p.accountLabel) + '</strong></div><footer><small>' + esc(p.detail) + '</small><button data-provider="' + esc(p.id) +
+    '">' + esc(p.actionLabel) + '</button></footer></article>'
+  ).join('') || '<p class="empty">No providers configured.</p>';
+  $$('[data-provider]').forEach(button => button.addEventListener('click', () => showGuide(button.dataset.provider)));
+}
+
+function bindAgents() {
+  $$('[data-agent-id]').forEach(node => node.addEventListener('click', () => inspectAgent(node.dataset.agentId)));
+}
+
+function inspectAgent(id) {
+  const agent = snapshot.agents.find(item => item.id === id);
+  if (!agent) return;
+  $$('.agent-node').forEach(node => node.classList.toggle('selected', node.dataset.agentId === id));
+  $('.director-profile .avatar').textContent = initials(agent);
+  $('.director-profile strong').textContent = agent.name;
+  $('.director-profile span').innerHTML = '<i></i>' + esc(title(agent.status)) + ' · ' + esc(agent.title);
+}
+
+async function showGuide(providerId) {
+  let guide;
+  if (invoke) {
+    guide = await invoke('get_connection_guide', {providerId});
+  } else {
+    const provider = providers.find(item => item.id === providerId);
+    const commands = {codex:'codex login',claude:'claude auth login',gh:'gh auth login',ollama:'ollama serve'};
+    guide = {title:'Connect ' + (provider?.name ?? providerId),description:'Use the official provider flow. Batai never stores your raw password or token.',command:commands[providerId],steps:['Open a terminal','Run the official connection command','Complete authentication','Return to Batai and check again']};
+  }
+  $('#dialog-title').textContent = guide.title;
+  $('#dialog-description').textContent = guide.description;
+  $('#dialog-steps').innerHTML = guide.steps.map(step => '<li>' + esc(step) + '</li>').join('');
+  $('#dialog-command').textContent = guide.command ?? 'No command required';
+  $('#copy-command').dataset.command = guide.command ?? '';
+  $('#connection-dialog').showModal();
+}
+
+function switchView(view) {
+  $$('.view').forEach(section => section.classList.toggle('active', section.id === 'view-' + view));
+  $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
+  $('#crumb-view').textContent = title(view);
+}
+
+async function sendMessage(content) {
+  if (invoke) return invoke('send_director_message', {content});
+  const response = await fetch('/api/god/messages', {method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({content,scope:'task',target:'director'})});
+  if (!response.ok) throw new Error('Control plane rejected the message');
+  return response.json();
+}
+
+async function boot() {
   try {
-    const state = await api('/api/state');
-    renderAgents(state.agents, state.resources);
-    renderTasks(state.tasks);
-    renderEvents(state.events);
-    renderInbox(state.director_inbox ?? []);
-    renderDecisions(state.decisions ?? []);
-    el('health').textContent = 'runtime online'; el('health').className = 'status-pill ok';
+    [snapshot, providers] = await Promise.all([loadSnapshot(), loadProviders()]);
+    renderOverview();
+    renderOrganization();
+    renderTasks();
+    renderProviders();
   } catch (error) {
-    el('health').textContent = 'runtime offline'; el('health').className = 'status-pill';
+    $('.runtime-state strong').textContent = 'Runtime offline';
+    $('.runtime-state>i').style.background = 'var(--red)';
+    $('#organization-preview').innerHTML = '<p class="empty">' + esc(error.message) + '</p>';
   }
 }
 
-el('create-agent').addEventListener('click', async () => {
-  const id = el('agent-id').value.trim();
-  const provider = el('agent-provider').value;
+$$('[data-view]').forEach(button => button.addEventListener('click', () => switchView(button.dataset.view)));
+$$('[data-view-link]').forEach(button => button.addEventListener('click', () => switchView(button.dataset.viewLink)));
+$('#open-accounts').addEventListener('click', () => switchView('accounts'));
+$('#refresh-providers').addEventListener('click', async () => { providers = await loadProviders(); renderProviders(); renderOverview(); });
+$('#copy-command').addEventListener('click', () => navigator.clipboard.writeText($('#copy-command').dataset.command || ''));
+$('#director-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const input = $('#director-input');
+  const content = input.value.trim();
+  if (!content) return;
+  const message = document.createElement('div');
+  message.className = 'message user';
+  message.innerHTML = '<div><p>' + esc(content) + '</p><small>Sending…</small></div>';
+  $('#chat-log').append(message);
+  input.value = '';
   try {
-    await api('/api/agents', { method:'POST', body:JSON.stringify({
-      id, name:el('agent-name').value.trim() || id, role_template:el('agent-role').value.trim() || 'SoftwareEngineer',
-      parent_agent_id:'director', provider, model:el('agent-model').value.trim(), reasoning_effort:el('agent-reasoning').value,
-      auth_mode:authModeForProvider(provider), worktree:null, allowed_paths:['**/*'], tools:['git','shell'], constraints:['Do not contact customer'],
-      max_turns:18, lifetime:'project', status:'READY'
-    }) });
-    el('agent-form-message').textContent = `Created ${id}`;
-    await refresh();
-  } catch (error) { el('agent-form-message').textContent = error.message; }
+    const receipt = await sendMessage(content);
+    $('small', message).textContent = 'Sent to Director · ' + receipt.id;
+  } catch (error) {
+    $('small', message).textContent = error.message;
+  }
 });
-
-el('create-task').addEventListener('click', async () => {
-  const id = el('task-id').value.trim();
-  try {
-    await api('/api/tasks', { method:'POST', body:JSON.stringify({
-      id, created_by:'director', objective:el('task-objective').value.trim(), assigned_to:[el('task-agent').value.trim()],
-      dependencies:el('task-deps').value.split(',').map(x=>x.trim()).filter(Boolean), acceptance_criteria:['Complete the assigned objective'], inputs:[], outputs:[],
-      status:'READY', execution:{parallel:false,requires_director_review:el('task-review').checked}, on_success:{notify:'director',reason:'task_completed'}, on_failure:{notify:'director'}
-    }) });
-    el('task-form-message').textContent = `Task ${id} written to .batai/tasks/`;
-    await new Promise(r => setTimeout(r, 150)); await refresh();
-  } catch (error) { el('task-form-message').textContent = error.message; }
-});
-
-
-el('send-god-message').addEventListener('click', async () => {
-  try {
-    const content = el('god-message').value.trim();
-    if (!content) return;
-    const created = await api('/api/god/messages',{method:'POST',body:JSON.stringify({content,scope:el('god-scope').value,target:'director'})});
-    el('god-form-message').textContent = `Sent ${created.id} to Director`;
-    el('god-message').value = '';
-    await refresh();
-  } catch (error) { el('god-form-message').textContent = error.message; }
-});
-
-refresh();
-refreshProviders();
-setInterval(refresh, 1500);
-setInterval(refreshProviders, 10000);
+$$('.quick-prompts button').forEach(button => button.addEventListener('click', () => {
+  $('#director-input').value = button.textContent;
+  $('#director-input').focus();
+}));
+boot();
