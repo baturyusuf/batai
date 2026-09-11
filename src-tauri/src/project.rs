@@ -9,6 +9,7 @@ use crate::domain::{
     task_progress, weighted_progress, AgentView, AppSnapshot, MessageReceipt, ProjectSummary,
     TaskView,
 };
+use crate::runtime::types::Agent;
 
 pub struct ProjectStore {
     root: PathBuf,
@@ -44,13 +45,33 @@ impl ProjectStore {
                 .iter()
                 .filter(|agent| matches!(agent.status.as_str(), "RUNNING" | "READY"))
                 .count(),
+            waiting_agents: agents
+                .iter()
+                .filter(|agent| matches!(agent.status.as_str(), "WAITING_RESOURCE" | "BLOCKED"))
+                .count(),
+            completed_tasks: tasks
+                .iter()
+                .filter(|task| task.status == "COMPLETED")
+                .count(),
+            running_tasks: tasks.iter().filter(|task| task.status == "RUNNING").count(),
             blocked_tasks: tasks.iter().filter(|task| task.status == "BLOCKED").count(),
+            remaining_tasks: tasks
+                .iter()
+                .filter(|task| !matches!(task.status.as_str(), "COMPLETED" | "CANCELLED"))
+                .count(),
             review_tasks: tasks.iter().filter(|task| task.status == "REVIEW").count(),
+            usage: Default::default(),
+            usage_by_source: Default::default(),
         };
         Ok(AppSnapshot {
             project: summary,
             agents,
             tasks,
+            god: Default::default(),
+            relationships: vec![],
+            resources: vec![],
+            activity: vec![],
+            hierarchy_warnings: vec![],
         })
     }
 
@@ -147,37 +168,47 @@ fn string_list(value: &Value, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn department_for(role: &str) -> String {
-    let role = role.to_lowercase();
-    if role.contains("director") || role.contains("product") {
-        "Leadership"
-    } else if role.contains("review") || role.contains("qa") || role.contains("test") {
-        "Quality"
-    } else if role.contains("design") || role.contains("frontend") {
-        "Product Design"
-    } else {
-        "Engineering"
-    }
-    .to_string()
-}
-
 fn load_agents(directory: &Path) -> io::Result<Vec<AgentView>> {
     let mut agents = vec![];
     for file in json_files(directory)? {
         let value = read_json(&file)?;
-        let title = text(&value, "role_template", "Agent");
+        let agent: Agent = serde_json::from_value(value).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{}: {error}", file.display()),
+            )
+        })?;
+        let agent = agent.with_backfilled_organization();
+        let function = serde_json::to_value(agent.function)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "GENERIC_SOFTWARE_AGENT".into());
+        let display_title = agent.display_title();
         agents.push(AgentView {
-            id: text(&value, "id", "unknown"),
-            name: text(&value, "name", "Unnamed agent"),
-            department: department_for(&title),
-            title,
-            reports_to: optional_text(&value, "parent_agent_id"),
-            provider: text(&value, "provider", "unassigned"),
-            model: text(&value, "model", "auto"),
-            auth_mode: text(&value, "auth_mode", "unknown"),
-            status: text(&value, "status", "CREATED"),
-            current_task_id: optional_text(&value, "current_task_id"),
-            worktree: optional_text(&value, "worktree"),
+            id: agent.id,
+            name: agent.name,
+            title: display_title,
+            department: agent
+                .department
+                .map_or("Engineering".into(), |value| value.to_string()),
+            seniority: agent
+                .seniority
+                .and_then(|value| serde_json::to_value(value).ok())
+                .and_then(|value| value.as_str().map(str::to_owned)),
+            level: agent.seniority.map(|value| value.level()),
+            function,
+            reports_to: agent.parent_agent_id,
+            provider: agent.provider,
+            model: agent.model,
+            reasoning_effort: agent.reasoning_effort,
+            auth_mode: agent.auth_mode,
+            status: agent.status.to_string(),
+            current_task_id: agent.current_task_id,
+            worktree: agent.worktree,
+            model_capabilities: agent.model_capabilities,
+            effective_capabilities: agent.effective_capabilities,
+            activity: "IDLE".into(),
+            ..AgentView::default()
         });
     }
     agents.sort_by_key(|agent| if agent.id == "director" { 0 } else { 1 });

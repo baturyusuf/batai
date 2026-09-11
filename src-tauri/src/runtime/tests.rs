@@ -1,11 +1,15 @@
 use std::{
     collections::HashMap,
     fs,
+    path::Path,
+    process::Command,
     sync::Arc,
     time::{Duration, Instant},
 };
 
 use tempfile::TempDir;
+
+use crate::runtime::CodexAppServerProvider;
 
 use super::{
     agents::AgentRegistry,
@@ -22,7 +26,23 @@ use super::{
         TaskExecution, TaskRunStatus, TaskStatus,
     },
     watcher::TaskWatcher,
+    worktrees::WorktreeManager,
 };
+
+fn checked_git(repository: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(repository)
+        .args(args)
+        .output()
+        .expect("run git command");
+    assert!(
+        output.status.success(),
+        "git {} failed: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
 
 struct Harness {
     store: RuntimeStore,
@@ -59,9 +79,16 @@ fn harness(store: RuntimeStore) -> Harness {
 
 fn agent(id: &str) -> Agent {
     Agent {
+        schema_version: 1,
         id: id.into(),
         name: id.into(),
         role_template: "SoftwareEngineer".into(),
+        seniority: None,
+        function: None,
+        department: None,
+        title_override: None,
+        model_capabilities: Default::default(),
+        effective_capabilities: Default::default(),
         parent_agent_id: Some("director".into()),
         provider: "mock".into(),
         model: "mock-medium".into(),
@@ -146,6 +173,114 @@ fn agent_persistence_round_trips_typed_state() {
     let h = harness(RuntimeStore::open_memory().expect("store"));
     register(&h, &["a"]);
     assert_eq!(h.agents.get("a").expect("read").expect("agent"), agent("a"));
+}
+
+#[test]
+fn organizational_fields_and_parent_persist_without_using_display_title_as_truth() {
+    use super::organization::{AgentFunction, Department, Seniority};
+
+    let store = RuntimeStore::open_memory().expect("store");
+    let events = EventEngine::new(store.clone());
+    let registry = AgentRegistry::new(store, events);
+    let mut nova = agent("nova");
+    nova.schema_version = 2;
+    nova.name = "Nova".into();
+    nova.role_template = "legacy-label-is-not-authoritative".into();
+    nova.seniority = Some(Seniority::Senior);
+    nova.function = Some(AgentFunction::BackendEngineering);
+    nova.department = Some(Department::Engineering);
+    nova.parent_agent_id = Some("director".into());
+    registry
+        .register(&nova)
+        .expect("register organizational agent");
+    let persisted = registry.get("nova").unwrap().unwrap();
+    assert_eq!(persisted.seniority, Some(Seniority::Senior));
+    assert_eq!(persisted.function, Some(AgentFunction::BackendEngineering));
+    assert_eq!(persisted.department, Some(Department::Engineering));
+    assert_eq!(persisted.parent_agent_id.as_deref(), Some("director"));
+    assert_eq!(persisted.display_title(), "Senior Backend Engineer");
+}
+
+#[test]
+fn new_schema_rejects_meaningless_seniority_function_combination() {
+    use super::organization::{AgentFunction, Seniority};
+
+    let store = RuntimeStore::open_memory().expect("store");
+    let events = EventEngine::new(store.clone());
+    let registry = AgentRegistry::new(store, events);
+    let mut invalid = agent("invalid-pm");
+    invalid.schema_version = 2;
+    invalid.seniority = Some(Seniority::Intern);
+    invalid.function = Some(AgentFunction::ProductManager);
+    assert!(registry.register(&invalid).is_err());
+}
+
+#[test]
+fn organization_snapshot_aggregates_identity_relationships_usage_and_metrics() {
+    use super::{
+        execution_provider::{UsageSnapshot, UsageSource},
+        organization::{AgentFunction, Department, Seniority},
+        BataiRuntime,
+    };
+
+    let root = TempDir::new().expect("temporary project");
+    let store = RuntimeStore::open_memory().expect("store");
+    let mut providers = HashMap::<String, Arc<dyn ExecutionProvider>>::new();
+    providers.insert("mock".into(), Arc::new(MockProvider::default()));
+    let runtime = BataiRuntime::with_store(root.path().to_path_buf(), store.clone(), providers)
+        .expect("runtime");
+    let mut director = agent("director");
+    director.schema_version = 2;
+    director.seniority = Some(Seniority::Director);
+    director.function = Some(AgentFunction::Director);
+    director.department = Some(Department::Leadership);
+    director.parent_agent_id = None;
+    runtime.agents.register(&director).unwrap();
+    let mut nova = agent("nova");
+    nova.schema_version = 2;
+    nova.name = "Nova".into();
+    nova.seniority = Some(Seniority::Senior);
+    nova.function = Some(AgentFunction::BackendEngineering);
+    nova.department = Some(Department::Engineering);
+    runtime.agents.register(&nova).unwrap();
+    let mut completed = task("TASK-ORG", &["nova"], &[]);
+    completed.status = TaskStatus::Completed;
+    completed.weight = 5.0;
+    store
+        .ingest_task(&completed, None, "organization-hash")
+        .unwrap();
+    let usage = UsageSnapshot {
+        source: UsageSource::Subscription,
+        input_tokens: Some(10),
+        output_tokens: Some(5),
+        ..UsageSnapshot::default()
+    };
+    store
+        .mark_task_run(
+            "TASK-ORG",
+            "nova",
+            TaskRunStatus::Completed,
+            Some(&serde_json::json!({"usage": usage})),
+            Some("mock"),
+            Some("real-session-shape"),
+        )
+        .unwrap();
+    let snapshot = runtime.snapshot().expect("organization snapshot");
+    let nova = snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.id == "nova")
+        .unwrap();
+    assert_eq!(nova.title, "Senior Backend Engineer");
+    assert_eq!(nova.department, "Engineering");
+    assert_eq!(nova.reports_to.as_deref(), Some("director"));
+    assert_eq!(nova.usage.total_tokens, Some(15));
+    assert_eq!(snapshot.project.progress, 100.0);
+    assert_eq!(snapshot.project.usage.total_tokens, Some(15));
+    assert!(snapshot.relationships.iter().any(|relationship| {
+        relationship.source == "director" && relationship.target == "nova"
+    }));
+    assert!(snapshot.hierarchy_warnings.is_empty());
 }
 
 #[test]
@@ -784,4 +919,150 @@ async fn normalized_usage_is_persisted_after_success() {
         .unwrap()
         .iter()
         .any(|event| event.event_type == EventType::UsageUpdated));
+}
+
+#[tokio::test]
+async fn real_codex_turn_mutates_only_a_managed_disposable_worktree() {
+    if std::env::var("BATAI_REAL_PROVIDER_E2E").as_deref() != Ok("codex") {
+        eprintln!("skipped: set BATAI_REAL_PROVIDER_E2E=codex to run authenticated inference");
+        return;
+    }
+
+    let batai_repository = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("Batai repository root");
+    let batai_status_before = checked_git(
+        batai_repository,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    );
+
+    let disposable = tempfile::Builder::new()
+        .prefix("batai-real-codex-e2e-")
+        .tempdir()
+        .expect("create disposable repository");
+    checked_git(disposable.path(), &["init", "--initial-branch=main"]);
+    checked_git(disposable.path(), &["config", "user.name", "Batai E2E"]);
+    checked_git(
+        disposable.path(),
+        &["config", "user.email", "batai-e2e@example.invalid"],
+    );
+    fs::write(disposable.path().join("README.md"), "# Disposable E2E\n")
+        .expect("seed disposable repository");
+    checked_git(disposable.path(), &["add", "README.md"]);
+    checked_git(disposable.path(), &["commit", "-m", "seed"]);
+
+    let store = RuntimeStore::open_memory().expect("open runtime store");
+    let events = EventEngine::new(store.clone());
+    let agents = AgentRegistry::new(store.clone(), events.clone());
+    let mut providers = HashMap::<String, Arc<dyn ExecutionProvider>>::new();
+    providers.insert("codex".into(), Arc::new(CodexAppServerProvider::default()));
+    let sessions = SessionManager::new(store.clone(), providers);
+    let worktrees = WorktreeManager::discover(disposable.path()).expect("discover worktrees");
+    let engine = Arc::new(
+        TaskEngine::new(
+            store.clone(),
+            events,
+            agents.clone(),
+            sessions,
+            Duration::from_secs(30),
+        )
+        .with_worktrees(worktrees.clone()),
+    );
+    let mut coding_agent = agent("codex-e2e");
+    coding_agent.parent_agent_id = None;
+    coding_agent.provider = "codex".into();
+    coding_agent.model = "auto".into();
+    coding_agent.auth_mode = "subscription".into();
+    agents
+        .register(&coding_agent)
+        .expect("register Codex agent");
+
+    let mut coding_task = task("real-codex-mutation", &["codex-e2e"], &[]);
+    coding_task.created_by = "e2e-test".into();
+    coding_task.objective = "Create hello.txt in the current working directory with exactly the text `Batai Codex E2E` followed by one newline. Do not modify any other file.".into();
+    let first_disposition = engine
+        .ingest(coding_task.clone(), None)
+        .await
+        .expect("execute authenticated Codex task");
+
+    let binding = worktrees
+        .ensure("codex-e2e", "real-codex-mutation")
+        .expect("load managed worktree binding");
+    let hello_path = binding.path.join("hello.txt");
+    let hello = fs::read_to_string(&hello_path).expect("Codex created hello.txt");
+    let changed_files = worktrees.status(&binding).expect("read worktree status");
+    let completed_task = store
+        .get_task("real-codex-mutation")
+        .expect("read task")
+        .expect("persisted task");
+    let first_run = store
+        .get_task_run("real-codex-mutation", "codex-e2e")
+        .expect("read task run")
+        .expect("persisted task run");
+    let session = store
+        .get_session("codex-e2e")
+        .expect("read session")
+        .expect("real provider session");
+    let first_turn_id = first_run
+        .checkpoint
+        .as_ref()
+        .and_then(|checkpoint| checkpoint.get("turn_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+
+    let second_disposition = engine
+        .ingest(coding_task, None)
+        .await
+        .expect("deduplicate completed task");
+    let second_run = store
+        .get_task_run("real-codex-mutation", "codex-e2e")
+        .expect("read deduplicated task run")
+        .expect("task run remains available");
+
+    drop(engine);
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    fs::remove_file(&hello_path).expect("clean disposable worktree mutation");
+    worktrees
+        .remove(&binding)
+        .expect("remove disposable worktree");
+    let batai_status_after = checked_git(
+        batai_repository,
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    );
+
+    assert_eq!(first_disposition, IngestDisposition::Created);
+    assert_eq!(second_disposition, IngestDisposition::Duplicate);
+    assert_eq!(hello, "Batai Codex E2E\n");
+    assert_eq!(changed_files, vec!["?? hello.txt"]);
+    assert!(!disposable.path().join("hello.txt").exists());
+    assert!(matches!(
+        completed_task.status,
+        TaskStatus::Completed | TaskStatus::Review
+    ));
+    assert_eq!(first_run.status, TaskRunStatus::Completed);
+    assert_eq!(first_run.provider.as_deref(), Some("codex"));
+    assert_eq!(
+        first_run.provider_session_id.as_deref(),
+        Some(session.provider_session_id.as_str())
+    );
+    assert!(first_turn_id.as_deref().is_some_and(|id| !id.is_empty()));
+    assert_eq!(
+        first_run
+            .checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.get("changed_files"))
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(second_run.attempt, 1);
+    assert_eq!(
+        second_run
+            .checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.get("turn_id"))
+            .and_then(serde_json::Value::as_str),
+        first_turn_id.as_deref()
+    );
+    assert_eq!(batai_status_after, batai_status_before);
 }

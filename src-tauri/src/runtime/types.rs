@@ -3,6 +3,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::organization::{
+    display_title, legacy_identity, AgentFunction, CapabilityProfile, Department, Seniority,
+};
+
 macro_rules! uppercase_enum {
     ($name:ident { $($variant:ident),+ $(,)? }) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -109,11 +113,25 @@ uppercase_enum!(EventType {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Agent {
+    #[serde(default = "default_agent_schema_version")]
+    pub schema_version: u32,
     pub id: String,
     pub name: String,
     #[serde(default = "default_role")]
     pub role_template: String,
     #[serde(default)]
+    pub seniority: Option<Seniority>,
+    #[serde(default, rename = "function")]
+    pub function: Option<AgentFunction>,
+    #[serde(default)]
+    pub department: Option<Department>,
+    #[serde(default)]
+    pub title_override: Option<String>,
+    #[serde(default)]
+    pub model_capabilities: CapabilityProfile,
+    #[serde(default)]
+    pub effective_capabilities: CapabilityProfile,
+    #[serde(default, alias = "reports_to")]
     pub parent_agent_id: Option<String>,
     pub provider: String,
     pub model: String,
@@ -129,6 +147,48 @@ pub struct Agent {
     pub current_task_id: Option<String>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
+}
+
+impl Agent {
+    pub fn with_backfilled_organization(&self) -> Self {
+        let mut agent = self.clone();
+        let (legacy_seniority, legacy_function) = legacy_identity(&agent.role_template);
+        agent.seniority = agent.seniority.or(legacy_seniority);
+        agent.function = agent.function.or(Some(legacy_function));
+        agent.department = agent
+            .department
+            .or_else(|| agent.function.map(AgentFunction::department));
+        agent
+    }
+
+    pub fn display_title(&self) -> String {
+        if let Some(title) = self
+            .title_override
+            .as_ref()
+            .filter(|title| !title.trim().is_empty())
+        {
+            return title.clone();
+        }
+        let normalized = self.with_backfilled_organization();
+        display_title(
+            normalized.seniority,
+            normalized
+                .function
+                .unwrap_or(AgentFunction::GenericSoftwareAgent),
+        )
+    }
+
+    pub fn organization_is_valid(&self) -> bool {
+        let normalized = self.with_backfilled_organization();
+        normalized
+            .seniority
+            .zip(normalized.function)
+            .is_none_or(|(seniority, function)| function.supports(seniority))
+    }
+}
+
+fn default_agent_schema_version() -> u32 {
+    1
 }
 
 fn default_role() -> String {

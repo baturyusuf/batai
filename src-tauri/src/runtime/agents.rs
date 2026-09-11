@@ -16,6 +16,13 @@ impl AgentRegistry {
         Self { store, events }
     }
     pub fn register(&self, agent: &Agent) -> Result<()> {
+        let normalized = agent.with_backfilled_organization();
+        if normalized.schema_version >= 2 && !normalized.organization_is_valid() {
+            return Err(RuntimeError::Provider(format!(
+                "invalid seniority/function combination for agent {}",
+                normalized.id
+            )));
+        }
         self.store.upsert_agent(agent)
     }
     pub fn get(&self, id: &str) -> Result<Option<Agent>> {

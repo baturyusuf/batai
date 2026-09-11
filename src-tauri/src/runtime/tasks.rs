@@ -313,7 +313,11 @@ impl TaskEngine {
             .get(&agent_id)?
             .ok_or_else(|| RuntimeError::AgentNotFound(agent_id.clone()))?;
         let mut binding = None;
-        if super::worktrees::role_requires_worktree(&agent.role_template) {
+        let coding_function = agent
+            .with_backfilled_organization()
+            .function
+            .is_some_and(super::organization::AgentFunction::is_coding);
+        if coding_function || super::worktrees::role_requires_worktree(&agent.role_template) {
             if let Some(manager) = &self.worktrees {
                 let created = manager.ensure(&agent_id, &task.id)?;
                 agent.worktree = Some(created.path.to_string_lossy().into_owned());

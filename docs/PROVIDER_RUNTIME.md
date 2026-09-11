@@ -83,3 +83,12 @@ BATAI_REAL_PROVIDER_SMOKE=codex cargo test --manifest-path src-tauri/Cargo.toml 
 ```
 
 The Codex smoke test starts the real App Server, creates a resumable thread and reads the authenticated rate-limit snapshot without running an inference turn.
+
+The stronger acceptance gate runs an actual coding turn:
+
+```powershell
+$env:BATAI_REAL_PROVIDER_E2E='codex'
+cargo test --manifest-path src-tauri/Cargo.toml real_codex_turn_mutates_only_a_managed_disposable_worktree -- --nocapture
+```
+
+It creates a disposable Git repository, assigns a Batai task to a Codex coding agent, creates a managed worktree, performs an actual inference turn that writes `hello.txt`, and verifies the result, provider/session/turn checkpoint, changed-file list and duplicate suppression. It records the Batai checkout status before and after, and removes the disposable mutation. No credential value is logged.

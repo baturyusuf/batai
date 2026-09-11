@@ -319,6 +319,26 @@ impl RuntimeStore {
             .collect()
     }
 
+    pub fn list_all_task_runs(&self) -> Result<Vec<TaskRun>> {
+        let db = self.db()?;
+        let mut statement = db.prepare(
+            "SELECT task_id,agent_id FROM task_runs ORDER BY updated_at,task_id,agent_id",
+        )?;
+        let keys = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(db);
+        keys.into_iter()
+            .map(|(task, agent)| {
+                self.get_task_run(&task, &agent)?
+                    .ok_or_else(|| RuntimeError::Provider("missing task run".into()))
+            })
+            .collect()
+    }
+
     pub fn mark_task_run(
         &self,
         task_id: &str,
