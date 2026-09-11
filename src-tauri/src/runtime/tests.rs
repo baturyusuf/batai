@@ -13,10 +13,15 @@ use crate::runtime::CodexAppServerProvider;
 
 use super::{
     agents::AgentRegistry,
+    economic::{
+        native_resource_profile, BillingMode, EconomicPolicy, RoutingDecision, RoutingOutcome,
+        TermsState,
+    },
     errors::RuntimeError,
     events::EventEngine,
     execution_provider::{ExecutionProvider, MockOutcome, MockProvider, UsageState},
     migrations::SCHEMA_VERSION,
+    organization::{CapabilityProfile, CapabilityScore},
     scheduler::DurableScheduler,
     sessions::SessionManager,
     store::RuntimeStore,
@@ -170,6 +175,103 @@ fn database_migration_upgrades_existing_legacy_database_without_data_loss() {
         TaskStatus::Completed
     );
     assert_eq!(store.schema_version().expect("version"), SCHEMA_VERSION);
+}
+
+#[test]
+fn economic_resources_policy_and_routing_audit_round_trip_without_credentials() {
+    let store = RuntimeStore::open_memory().expect("store");
+    let profile = native_resource_profile("local", "ollama", "Local", BillingMode::Local);
+    store.upsert_intelligence_resource(&profile).unwrap();
+    assert_eq!(store.list_intelligence_resources().unwrap(), vec![profile]);
+    let policy = EconomicPolicy {
+        allow_payg: true,
+        ..EconomicPolicy::default()
+    };
+    store.set_economic_policy(&policy).unwrap();
+    assert_eq!(store.economic_policy().unwrap(), policy);
+    let decision = RoutingDecision {
+        id: "r".into(),
+        task_id: "t".into(),
+        timestamp: chrono::Utc::now().to_rfc3339(),
+        outcome: RoutingOutcome::NoSuitableResource,
+        selected_resource_id: None,
+        selected_provider: None,
+        selected_model: None,
+        reasoning_effort: None,
+        reasons: vec!["unknown capability".into()],
+        alternatives: vec![],
+        candidates: vec![],
+        policy,
+    };
+    store.save_routing_decision(&decision).unwrap();
+    assert_eq!(
+        store.list_routing_decisions(Some("t"), 10).unwrap(),
+        vec![decision]
+    );
+}
+
+#[tokio::test]
+async fn auto_agent_routes_once_before_provider_session_and_checkpoints_explanation() {
+    let store = RuntimeStore::open_memory().unwrap();
+    let events = EventEngine::new(store.clone());
+    let agents = AgentRegistry::new(store.clone(), events.clone());
+    let mock = Arc::new(MockProvider::default());
+    let mut providers = HashMap::<String, Arc<dyn ExecutionProvider>>::new();
+    providers.insert("mock".into(), mock.clone());
+    let sessions = SessionManager::new(store.clone(), providers);
+    let engine = Arc::new(
+        TaskEngine::new(
+            store.clone(),
+            events,
+            agents.clone(),
+            sessions,
+            Duration::from_millis(20),
+        )
+        .with_economic_routing(),
+    );
+    let auto: Agent = serde_json::from_value(serde_json::json!({
+        "id":"auto-worker","name":"Auto","provider":"auto","model":"auto",
+        "function":"SOFTWARE_ENGINEER","seniority":"JUNIOR",
+        "intelligence_policy":{"assignment":"AUTO"}
+    }))
+    .unwrap();
+    agents.register(&auto).unwrap();
+    let mut resource =
+        native_resource_profile("mock-local", "mock", "Mock Local", BillingMode::Local);
+    resource.status = "AVAILABLE".into();
+    resource.supported_models = vec!["mock-model".into()];
+    resource.terms.allowed_use_mode = TermsState::Allowed;
+    resource.capabilities = CapabilityProfile {
+        coding: Some(CapabilityScore::new(90).unwrap()),
+        tool_use: Some(CapabilityScore::new(90).unwrap()),
+        ..CapabilityProfile::default()
+    };
+    store.upsert_intelligence_resource(&resource).unwrap();
+    let task: Task = serde_json::from_value(serde_json::json!({
+        "id":"auto-task","created_by":"director","objective":"safe task","assigned_to":["auto-worker"]
+    }))
+    .unwrap();
+    engine.ingest(task, None).await.unwrap();
+    wait_status(&store, "auto-task", TaskStatus::Completed).await;
+    assert_eq!(mock.total_calls(), 1);
+    let run = store
+        .get_task_run("auto-task", "auto-worker")
+        .unwrap()
+        .unwrap();
+    let checkpoint = run.checkpoint.unwrap();
+    assert_eq!(
+        checkpoint
+            .pointer("/routing_decision/resource_id")
+            .and_then(serde_json::Value::as_str),
+        Some("mock-local")
+    );
+    assert_eq!(
+        store
+            .list_routing_decisions(Some("auto-task"), 10)
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]

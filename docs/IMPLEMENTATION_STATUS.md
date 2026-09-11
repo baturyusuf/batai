@@ -24,7 +24,7 @@
 - Web control plane
 - HTTP control-plane validation for malformed JSON and invalid payloads
 
-Automated test suite: **32 passing Node tests** at the time of this snapshot.
+Automated compatibility/UI suite: **35 passing Node tests** at the time of this snapshot.
 
 ## Implemented and smoke-tested at protocol/process level
 
@@ -83,14 +83,20 @@ Automated test suite: **32 passing Node tests** at the time of this snapshot.
 - Separate per-request provider approval ledger with official protocol identity, interactive `Allow once`/`Deny`, bounded expiry, headless fail-closed behavior, cancellation and restart orphaning.
 - Explicit review outcomes and evidence-backed review acceptance metrics, plus typed handoff/meeting foundations.
 - Organization Edit mode, create-agent and relationship forms, explicit mutation confirmations, Decision Ledger, provider approval queue and policy Settings.
-- Ninety-two passing Rust tests, including deterministic approval/recovery fault tests, an explicit opt-in authenticated Codex App Server smoke and a separate real inference/worktree acceptance test.
+- Existing deterministic approval/recovery tests, explicit opt-in authenticated Codex smoke and real inference/worktree acceptance remain intact.
+- Typed Economic Intelligence resources, billing/terms profiles, capability evidence and deterministic quota-aware routing with durable decision audit.
+- Cross-platform CPU/RAM/disk profiling and structured NVIDIA VRAM/driver discovery with stable hardware fingerprinting.
+- Ollama inventory/details/running-model/pull-progress/cancellation/removal APIs, conservative local catalog fit and an isolated deterministic benchmark suite.
+- Kimi Code, Z.AI Coding Plan and MiniMax Token Plan subscription adapters over shared OpenAI-compatible transport, provider-specific verified model catalogs, error handling and operating-system vault credentials.
+- Intelligence Portfolio, Local AI setup, model download/benchmark actions, role-specific recommendations and task/agent routing explanations in the desktop UI.
+- One hundred sixteen passing Rust tests, including hardware, benchmark, fake Ollama/provider HTTP, storage, opt-in provider smoke and pre-dispatch economic routing coverage.
 - Manual UI smoke at 1440x900 and 1100x720 with no JavaScript console errors.
 
 The Node HTTP control plane remains as a compatibility layer until the Rust task, event, session and resource engines reach feature parity.
 
 ## Next engineering milestones
 
-1. Extend journal-backed recovery to future GitHub lifecycle actions and add richer recovery inspection/diff tooling.
+1. Calibrate routing weights with opt-in real-task outcome evidence and add governed manual capability editing for hosted resources.
 2. Implement meeting scheduling, event-derived temporary graph groups and automatic safe summaries on the typed meeting foundation.
 3. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
 4. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.

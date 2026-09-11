@@ -38,6 +38,9 @@ The core idea is that the **Director AI operates the organization through Batai 
 - Live node-edge Organization Map with Hierarchy, Workflow and Combined modes, semantic edges, search, filters, pan/zoom and Agent Inspector
 - Organization Edit mode, Agent Factory form, GOD decisions, exact live provider approvals, recovery queue and project policy settings
 - Resource Dashboard with provider health, usage source, quota, token and provider-reported cost summaries
+- Economic Intelligence Portfolio with typed resource tiers/billing, hardware-aware local model catalog, secure subscription resources and deterministic quota-aware routing
+- Windows-first hardware profiling, NVIDIA VRAM discovery, explicit Ollama pull/model management and hardware-bound local capability benchmarks
+- Official OpenAI-compatible Kimi Code, Z.AI Coding Plan and MiniMax Token Plan adapters with OS-vault credentials and provider-specific terms/model catalogs
 - Tauri 2 desktop application backed by the Rust runtime
 - Rust bundled-SQLite migrations, typed runtime state and persist-first events
 - Rust task watcher, dependency DAG, idempotent dispatch and per-agent serialization
@@ -120,6 +123,8 @@ Batai deterministic control plane
 
 Each coding agent can be assigned its own Git worktree. Director chooses the minimum sufficient model/reasoning level for a task and can use local, subscription-backed or API-backed adapters according to project policy.
 
+New `AUTO` agents use the [Economic Router](docs/ECONOMIC_ROUTING.md) before dispatch. Existing explicit agents are not migrated or silently rerouted. See [Local Models](docs/LOCAL_MODELS.md) for hardware detection, Ollama management and deterministic benchmark semantics.
+
 ## Declarative coordination example
 
 Director writes a task such as:
@@ -173,5 +178,6 @@ tests/          orchestration/provider tests
 - Cross-store organization mutations use a durable operation journal with forward completion, safe rollback and fingerprint-conflict review. Batai does not claim distributed ACID across the filesystem and SQLite.
 - GitHub lifecycle parity and some organizational-memory workflows still come from the Node compatibility layer.
 - Runtime events expose observable execution trace, not hidden model reasoning. Fine-grained activities such as reading versus testing remain generic when a provider does not report them.
+- Subscription quota remains Unknown when no official quota endpoint is available; plan prices are user-supplied reporting data and never hard-coded as routing truth.
 
 See [Organization Model](docs/ORGANIZATION_MODEL.md), [Organization Governance](docs/GOVERNANCE.md), [Recovery Model](docs/RECOVERY_MODEL.md), `docs/IMPLEMENTATION_STATUS.md` and `specs/` for the remaining roadmap.

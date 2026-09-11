@@ -9,6 +9,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;
 
 use super::{
+    benchmark::BenchmarkResult,
+    economic::{EconomicPolicy, ResourceProfile, RoutingDecision},
     errors::{Result, RuntimeError},
     migrations,
     recovery::OperationJournal,
@@ -66,6 +68,93 @@ impl RuntimeStore {
             [],
             |row| row.get(0),
         )?)
+    }
+
+    pub fn upsert_intelligence_resource(&self, profile: &ResourceProfile) -> Result<()> {
+        self.db()?.execute(
+            r#"INSERT INTO intelligence_resources(id,provider,billing_mode,status,profile_json,updated_at)
+               VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,
+               billing_mode=excluded.billing_mode,status=excluded.status,profile_json=excluded.profile_json,updated_at=excluded.updated_at"#,
+            params![profile.id, profile.provider, serde_json::to_value(profile.billing_mode)?.as_str().unwrap_or("UNKNOWN"), profile.status,
+                serde_json::to_string(profile)?, now()],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_intelligence_resources(&self) -> Result<Vec<ResourceProfile>> {
+        let db = self.db()?;
+        let mut statement =
+            db.prepare("SELECT profile_json FROM intelligence_resources ORDER BY id")?;
+        let values = statement
+            .query_map([], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn save_benchmark(&self, result: &BenchmarkResult) -> Result<()> {
+        self.db()?.execute(r#"INSERT OR REPLACE INTO model_benchmarks(id,model_id,hardware_fingerprint,suite_version,result_json,created_at)
+            VALUES(?,?,?,?,?,?)"#, params![result.id,result.model_id,result.hardware_fingerprint,result.suite_version,serde_json::to_string(result)?,result.observed_at])?;
+        Ok(())
+    }
+
+    pub fn list_benchmarks(
+        &self,
+        hardware_fingerprint: Option<&str>,
+    ) -> Result<Vec<BenchmarkResult>> {
+        let db = self.db()?;
+        let sql = if hardware_fingerprint.is_some() {
+            "SELECT result_json FROM model_benchmarks WHERE hardware_fingerprint=? ORDER BY created_at DESC"
+        } else {
+            "SELECT result_json FROM model_benchmarks WHERE ? IS NULL ORDER BY created_at DESC"
+        };
+        let mut statement = db.prepare(sql)?;
+        let values = statement
+            .query_map([hardware_fingerprint], |row| {
+                json_column(row.get::<_, String>(0)?)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn save_routing_decision(&self, decision: &RoutingDecision) -> Result<()> {
+        self.db()?.execute(r#"INSERT OR IGNORE INTO routing_decisions(id,task_id,resource_id,outcome,decision_json,created_at) VALUES(?,?,?,?,?,?)"#,
+            params![decision.id,decision.task_id,decision.selected_resource_id,serde_json::to_value(&decision.outcome)?.as_str().unwrap_or("UNKNOWN"),serde_json::to_string(decision)?,decision.timestamp])?;
+        Ok(())
+    }
+
+    pub fn list_routing_decisions(
+        &self,
+        task_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<RoutingDecision>> {
+        let db = self.db()?;
+        let mut statement = db.prepare("SELECT decision_json FROM routing_decisions WHERE (? IS NULL OR task_id=?) ORDER BY created_at DESC LIMIT ?")?;
+        let values = statement
+            .query_map(params![task_id, task_id, limit as i64], |row| {
+                json_column(row.get::<_, String>(0)?)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn economic_policy(&self) -> Result<EconomicPolicy> {
+        let value = self
+            .db()?
+            .query_row(
+                "SELECT policy_json FROM economic_policy WHERE scope='project'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .unwrap_or_else(|| Ok(EconomicPolicy::default()))
+    }
+
+    pub fn set_economic_policy(&self, policy: &EconomicPolicy) -> Result<()> {
+        self.db()?.execute(r#"INSERT INTO economic_policy(scope,policy_json,updated_at) VALUES('project',?,?) ON CONFLICT(scope) DO UPDATE SET policy_json=excluded.policy_json,updated_at=excluded.updated_at"#,
+            params![serde_json::to_string(policy)?,now()])?;
+        Ok(())
     }
 
     pub fn upsert_governance_record<T: serde::Serialize>(

@@ -73,6 +73,11 @@ impl ProjectStore {
             activity: vec![],
             hierarchy_warnings: vec![],
             governance: Default::default(),
+            hardware: None,
+            local_models: vec![],
+            intelligence_resources: vec![],
+            economic_policy: Default::default(),
+            routing_decisions: vec![],
         })
     }
 

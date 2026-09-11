@@ -1,4 +1,5 @@
 import {buildGraph, preservedSelection, searchableText, statusGroup} from './organization-graph.js';
+import {formatBytes,routingSummary} from './economic-ui.js';
 import {
   FUNCTIONS, SENIORITIES, conflictMessage, createMutationRequest, openCount,
   relationshipIsEditable, validFunctionsForSeniority
@@ -14,8 +15,10 @@ const number = value => value === null || value === undefined ? '—' : Number(v
 const percent = value => value === null || value === undefined ? '—' : `${Math.round(value * 10) / 10}%`;
 const departmentLabel = value => value === 'DATA_AI' || value === 'DataAi' ? 'Data & AI' : label(value);
 
-let snapshot = {god:{id:'god',label:'User'},project:{name:'Batai',progress:0,usage:{}},agents:[],tasks:[],relationships:[],resources:[],activity:[],hierarchyWarnings:[],governance:{revision:0,policy:{limits:{maxActiveAgents:8,maxHierarchyDepth:3}},decisions:[],providerApprovals:[],audit:[],recoveryOperations:[],recoveryRequiresReview:0}};
+let snapshot = {god:{id:'god',label:'User'},project:{name:'Batai',progress:0,usage:{}},agents:[],tasks:[],relationships:[],resources:[],intelligenceResources:[],localModels:[],routingDecisions:[],activity:[],hierarchyWarnings:[],governance:{revision:0,policy:{limits:{maxActiveAgents:8,maxHierarchyDepth:3}},decisions:[],providerApprovals:[],audit:[],recoveryOperations:[],recoveryRequiresReview:0}};
 let providers = [];
+let localAiState = null;
+const pullProgress = new Map();
 let refreshTimer;
 let inspectorTab = 'overview';
 let organizationEditMode = false;
@@ -123,17 +126,36 @@ function renderProviders() {
 
 function renderResources() {
   const connectionById = new Map(providers.map(provider => [provider.id, provider]));
-  const resources = snapshot.resources?.length ? snapshot.resources : providers.map(provider => ({
-    provider:provider.id, status:provider.status === 'connected' ? 'AVAILABLE' : 'UNKNOWN',
-    usageSources:[], activeAgents:snapshot.agents.filter(agent => agent.provider === provider.id && agent.status === 'RUNNING').length,
-    usedPercent:null, resetAt:null, usage:{}
-  }));
+  const resources = snapshot.intelligenceResources?.length ? snapshot.intelligenceResources : (snapshot.resources ?? []).map(resource => ({id:resource.provider,displayName:label(resource.provider),provider:resource.provider,billingMode:'UNKNOWN',status:resource.status,quota:{usedPercent:resource.usedPercent,resetAt:resource.resetAt},usage:{inputTokens:resource.usage?.inputTokens,outputTokens:resource.usage?.outputTokens,knownCost:resource.usage?.cost,currency:resource.usage?.currency},terms:{}}));
+  const hardware = snapshot.hardware;
+  const gpu = hardware?.gpus?.[0];
+  $('#hardware-profile').innerHTML = hardware ? `<div><span>CPU</span><strong>${esc(valueOrDash(hardware.cpu?.name))}</strong><small>${number(hardware.cpu?.physicalCores)} physical · ${number(hardware.cpu?.logicalCores)} logical cores</small></div><div><span>Memory</span><strong>${formatBytes(hardware.memory?.totalBytes)}</strong><small>${formatBytes(hardware.memory?.availableBytes)} currently available</small></div><div><span>GPU</span><strong>${esc(gpu?.name ?? 'No supported GPU detected')}</strong><small>${gpu ? `${formatBytes(gpu.vramTotalBytes)} VRAM · ${formatBytes(gpu.vramAvailableBytes)} free` : 'CPU/RAM fallback is assessed conservatively'}</small></div><div><span>Hardware fingerprint</span><strong class="mono">${esc(hardware.fingerprint?.slice(0,16) ?? '—')}</strong><small>Benchmarks are valid only for this hardware identity</small></div>` : '<p class="empty">Hardware profile unavailable.</p>';
+  $('#ollama-state').textContent = label(localAiState?.state ?? 'Unknown');
+  const installed = new Set((localAiState?.installed ?? []).flatMap(model => [model.name, model.model]).filter(Boolean));
+  $('#local-model-catalog').innerHTML = (snapshot.localModels ?? []).map(item => {
+    const model = item.catalog; const benchmark = item.benchmark; const progress = pullProgress.get(model.id); const isInstalled = installed.has(model.id);
+    const roles = (benchmark?.recommendedRoles ?? []).map(role => `${label(role.seniority)} ${label(role.function)}`).join(' · ');
+    return `<article class="model-card"><header><div><strong>${esc(model.displayName)}</strong><span>${esc(model.parameterScale)} · ${esc(model.quantization ?? 'Default quantization')}</span></div><b class="fit-${esc(item.fit.fit.toLowerCase())}">${esc(label(item.fit.fit))} fit · estimate</b></header><dl><div><dt>Disk / VRAM estimate</dt><dd>${formatBytes(model.approximateDiskBytes)} / ${formatBytes(model.approximateVramBytes)}</dd></div><div><dt>Context</dt><dd>${number(model.contextTokens)} tokens</dd></div><div><dt>Installed</dt><dd>${isInstalled ? 'Yes' : 'No'}</dd></div><div><dt>Benchmark</dt><dd>${benchmark ? `Suite v${benchmark.suiteVersion}` : 'Not run'}</dd></div></dl>${progress ? `<div class="download-progress"><i style="width:${progress.percent ?? 0}%"></i><span>${esc(progress.status)} · ${percent(progress.percent)}</span></div>` : ''}<p>${esc(roles || item.fit.reasons?.[0] || 'No capability evidence yet')}</p><footer>${isInstalled ? `<button data-benchmark-model="${esc(model.id)}">Benchmark on this computer</button>` : `<button data-download-model="${esc(model.id)}">Download & Configure</button>`}${progress ? `<button data-cancel-model="${esc(model.id)}">Cancel</button>` : ''}</footer></article>`;
+  }).join('') || '<p class="empty">No curated models available.</p>';
   $('#resource-summary').innerHTML = resources.map(resource => {
-    const connection = connectionById.get(resource.provider);
-    const cost = resource.usage?.cost == null ? 'Unknown' : `${resource.usage.currency ?? ''} ${resource.usage.cost.toFixed(4)}`.trim();
-    return `<article class="resource-card"><header><div class="provider-logo">${esc((connection?.name ?? resource.provider)[0].toUpperCase())}</div><div><strong>${esc(connection?.name ?? label(resource.provider))}</strong><span>${esc(connection?.kind ?? 'Configured provider')}</span></div><b class="resource-health health-${esc(resource.status.toLowerCase())}">${esc(label(resource.status))}</b></header><dl><div><dt>Usage source</dt><dd>${esc((resource.usageSources ?? []).map(label).join(', ') || 'Unknown')}</dd></div><div><dt>Active agents</dt><dd>${number(resource.activeAgents)}</dd></div><div><dt>Known tokens</dt><dd>${number(resource.usage?.totalTokens)}</dd></div><div><dt>Known cost</dt><dd>${esc(cost)}</dd></div><div><dt>Quota used</dt><dd>${percent(resource.usedPercent)}</dd></div><div><dt>Reset</dt><dd>${esc(valueOrDash(resource.resetAt))}</dd></div></dl></article>`;
+    const connection = connectionById.get(resource.id) ?? connectionById.get(resource.provider);
+    const totalTokens = resource.usage?.inputTokens != null && resource.usage?.outputTokens != null ? resource.usage.inputTokens + resource.usage.outputTokens : null;
+    const cost = resource.usage?.knownCost == null ? 'Unknown' : `${resource.usage.currency ?? ''} ${Number(resource.usage.knownCost).toFixed(4)}`.trim();
+    const terms = resource.terms?.allowedUseMode ?? 'UNKNOWN';
+    return `<article class="resource-card"><header><div class="provider-logo">${esc((resource.displayName ?? resource.provider)[0].toUpperCase())}</div><div><strong>${esc(resource.displayName ?? label(resource.provider))}</strong><span>${esc(label(resource.billingMode))}${resource.planName ? ` · ${esc(resource.planName)}` : ''}</span></div><b class="resource-health health-${esc(String(resource.status).toLowerCase())}">${esc(label(connection?.status === 'connected' ? 'AVAILABLE' : resource.status))}</b></header><dl><div><dt>Models</dt><dd>${esc(resource.supportedModels?.length ? resource.supportedModels.join(', ') : 'Provider managed')}</dd></div><div><dt>Active / limit</dt><dd>${number(resource.currentConcurrency)} / ${number(resource.concurrencyLimit)}</dd></div><div><dt>Known tokens</dt><dd>${number(totalTokens)}</dd></div><div><dt>Known marginal cost</dt><dd>${esc(cost)}</dd></div><div><dt>Quota used</dt><dd>${percent(resource.quota?.usedPercent)}</dd></div><div><dt>Reset</dt><dd>${esc(valueOrDash(resource.quota?.resetAt))}</dd></div><div><dt>Use terms</dt><dd>${esc(label(terms))}</dd></div></dl>${connection && ['kimi-personal-membership','zai-coding-plan','minimax-token-plan'].includes(connection.id) ? `<footer><button data-provider="${esc(connection.id)}">${esc(connection.actionLabel)}</button></footer>` : ''}</article>`;
   }).join('') || '<p class="empty">No runtime resource state has been reported.</p>';
+  const bySource = snapshot.project?.usageBySource ?? {};
+  $('#economic-summary').innerHTML = ['local','subscription','api'].map(source => `<article><span>${esc(label(source))} inference</span><strong>${number(bySource[source]?.totalTokens)}</strong><small>known tokens</small></article>`).join('') + `<article><span>Known provider spend</span><strong>${snapshot.project?.usage?.cost == null ? '—' : `${esc(snapshot.project.usage.currency ?? '')} ${Number(snapshot.project.usage.cost).toFixed(4)}`}</strong><small>Subscriptions are not converted to fake savings</small></article>`;
+  $('#routing-audit').innerHTML = (snapshot.routingDecisions ?? []).map(decision => `<article><header><strong>${esc(decision.taskId)}</strong><span>${esc(label(decision.outcome))}</span></header><p>${esc(routingSummary(decision))}</p><small>${esc((decision.reasons ?? []).join(' · '))}</small></article>`).join('') || '<p class="empty">No AUTO routing decision has been made yet.</p>';
+  $$('[data-download-model]').forEach(button => button.addEventListener('click', () => downloadModel(button.dataset.downloadModel)));
+  $$('[data-cancel-model]').forEach(button => button.addEventListener('click', () => invoke?.('cancel_ollama_pull',{modelId:button.dataset.cancelModel})));
+  $$('[data-benchmark-model]').forEach(button => button.addEventListener('click', () => benchmarkModel(button.dataset.benchmarkModel)));
+  $$('[data-provider]', $('#resource-summary')).forEach(button => button.addEventListener('click', () => showGuide(button.dataset.provider)));
 }
+
+async function refreshLocalAi() { if (!invoke) return; localAiState = await invoke('get_local_ai_state'); renderResources(); }
+async function downloadModel(modelId) { if (!invoke || pullProgress.has(modelId)) return; pullProgress.set(modelId,{status:'starting',percent:null}); renderResources(); try { await invoke('pull_ollama_model',{modelId}); await refreshSnapshot(); await refreshLocalAi(); } catch (error) { pullProgress.set(modelId,{status:String(error),percent:null}); renderResources(); } finally { if (pullProgress.get(modelId)?.status === 'success') pullProgress.delete(modelId); } }
+async function benchmarkModel(modelId) { if (!invoke) return; const button=$(`[data-benchmark-model="${CSS.escape(modelId)}"]`); if(button){button.disabled=true;button.textContent='Benchmarking…';} try { await invoke('benchmark_local_model',{modelId}); await refreshSnapshot(); } catch(error) { alert(`Benchmark failed: ${error}`); } }
 
 function renderGovernance() {
   const governance = snapshot.governance ?? {};
@@ -167,6 +189,14 @@ function renderPolicy() {
   form.elements.autoAgentCreation.checked = Boolean(policy.autoAgentCreation);
   form.elements.allowedProviders.value = (policy.allowedProviders ?? []).join(', ');
   form.elements.deniedProviders.value = (policy.deniedProviders ?? []).join(', ');
+  const economic = snapshot.economicPolicy ?? {};
+  const economicForm = $('#economic-policy-form');
+  economicForm.elements.preferLocal.checked = economic.preferLocal !== false;
+  economicForm.elements.preferSubscription.checked = economic.preferSubscription !== false;
+  economicForm.elements.quotaConservationMode.checked = economic.quotaConservationMode !== false;
+  economicForm.elements.economicAllowPayg.checked = Boolean(economic.allowPayg);
+  economicForm.elements.minCapabilityMargin.value = economic.minCapabilityMargin ?? 3;
+  economicForm.elements.maxPaygPerTask.value = economic.maxPaygPerTask ?? '';
 }
 
 async function refreshSnapshot() {
@@ -371,14 +401,16 @@ function renderInspector(agent) {
     return;
   }
   const actions = organizationEditMode ? `<div class="agent-actions"><button data-agent-edit="identity">Edit identity</button><button data-agent-edit="reporting">Change manager</button><button data-agent-edit="${agent.status === 'PAUSED' ? 'resume' : 'pause'}">${agent.status === 'PAUSED' ? 'Resume' : 'Pause'}</button>${agent.authority !== 'DIRECTOR' && agent.function !== 'DIRECTOR' ? '<button class="danger" data-agent-edit="terminate">Terminate</button>' : ''}</div>` : '';
-  $('#inspector-content').innerHTML = `<div class="agent-inspector-hero"><div class="avatar ${agent.function === 'DIRECTOR' ? 'director' : ''}">${esc(initials(agent))}</div><div><strong>${esc(agent.name)}</strong><span>${esc(agent.title)}</span><small>${esc(activityIcon(agent.activity))} ${esc(label(agent.activity))}</small><i class="authority-chip">${esc(label(agent.authority))} · ${esc(label(agent.lifecycle))}</i></div></div>${actions}<section class="inspector-section"><h3>Organizational identity</h3><dl>${inspectorMetric('Seniority',agent.seniority ? `${label(agent.seniority)} · L${agent.level}` : 'Unspecified')}${inspectorMetric('Function',label(agent.function))}${inspectorMetric('Department',agent.department)}${inspectorMetric('Reports to',agent.reportsTo)}${inspectorMetric('Direct reports',agent.directReports?.join(', ') || '—')}</dl></section><section class="inspector-section"><h3>Assigned intelligence</h3><dl>${inspectorMetric('Model',agent.model)}${inspectorMetric('Provider',label(agent.provider))}${inspectorMetric('Reasoning effort',label(agent.reasoningEffort))}${inspectorMetric('Auth / usage',label(agent.authMode))}</dl></section><section class="inspector-section"><h3>Current runtime</h3><dl>${inspectorMetric('Status',label(agent.status))}${inspectorMetric('Activity',label(agent.activity))}${inspectorMetric('Task',agent.currentTaskId)}${inspectorMetric('Worktree',agent.worktree)}${inspectorMetric('Session',agent.sessionState)}</dl></section>`;
+  const routing=(snapshot.routingDecisions ?? []).find(decision=>decision.taskId===agent.currentTaskId);
+  $('#inspector-content').innerHTML = `<div class="agent-inspector-hero"><div class="avatar ${agent.function === 'DIRECTOR' ? 'director' : ''}">${esc(initials(agent))}</div><div><strong>${esc(agent.name)}</strong><span>${esc(agent.title)}</span><small>${esc(activityIcon(agent.activity))} ${esc(label(agent.activity))}</small><i class="authority-chip">${esc(label(agent.authority))} · ${esc(label(agent.lifecycle))}</i></div></div>${actions}<section class="inspector-section"><h3>Organizational identity</h3><dl>${inspectorMetric('Seniority',agent.seniority ? `${label(agent.seniority)} · L${agent.level}` : 'Unspecified')}${inspectorMetric('Function',label(agent.function))}${inspectorMetric('Department',agent.department)}${inspectorMetric('Reports to',agent.reportsTo)}${inspectorMetric('Direct reports',agent.directReports?.join(', ') || '—')}</dl></section><section class="inspector-section"><h3>Assigned intelligence</h3><dl>${inspectorMetric('Model',routing?.selectedModel ?? agent.model)}${inspectorMetric('Provider',label(routing?.selectedProvider ?? agent.provider))}${inspectorMetric('Billing resource',routing?.selectedResourceId)}${inspectorMetric('Reasoning effort',label(routing?.reasoningEffort ?? agent.reasoningEffort))}${inspectorMetric('Auth / usage',label(agent.authMode))}</dl>${routing ? `<p class="routing-reason">${esc(routing.reasons?.join(' · '))}</p>` : '<p class="metric-note">No AUTO routing decision for the current task.</p>'}</section><section class="inspector-section"><h3>Current runtime</h3><dl>${inspectorMetric('Status',label(agent.status))}${inspectorMetric('Activity',label(agent.activity))}${inspectorMetric('Task',agent.currentTaskId)}${inspectorMetric('Worktree',agent.worktree)}${inspectorMetric('Session',agent.sessionState)}</dl></section>`;
   $$('[data-agent-edit]').forEach(button => button.addEventListener('click', () => beginAgentAction(agent, button.dataset.agentEdit)));
 }
 
 function renderTaskInspector(task) {
   $('#inspector-heading').textContent = task.id;
   $('#inspector-tabs').hidden = true;
-  $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Task</h3><p class="task-objective">${esc(task.objective)}</p><dl>${inspectorMetric('Status',label(task.status))}${inspectorMetric('Owner',(task.assignedTo ?? []).join(', ') || 'Unassigned')}${inspectorMetric('Dependencies',(task.dependencies ?? []).join(', ') || '—')}${inspectorMetric('Weight',task.weight)}</dl></section><button class="primary-button" id="open-task-board">Open Task Board</button>`;
+  const routing=(snapshot.routingDecisions ?? []).find(decision=>decision.taskId===task.id);
+  $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Task</h3><p class="task-objective">${esc(task.objective)}</p><dl>${inspectorMetric('Status',label(task.status))}${inspectorMetric('Owner',(task.assignedTo ?? []).join(', ') || 'Unassigned')}${inspectorMetric('Dependencies',(task.dependencies ?? []).join(', ') || '—')}${inspectorMetric('Weight',task.weight)}</dl></section>${routing ? `<section class="inspector-section"><h3>Intelligence assignment</h3><dl>${inspectorMetric('Resource',routing.selectedResourceId)}${inspectorMetric('Model',routing.selectedModel)}${inspectorMetric('Effort',label(routing.reasoningEffort))}</dl><p class="routing-reason">${esc(routing.reasons?.join(' · '))}</p></section>` : ''}<button class="primary-button" id="open-task-board">Open Task Board</button>`;
   $('#open-task-board').addEventListener('click', () => switchView('tasks'));
 }
 
@@ -412,8 +444,11 @@ async function showGuide(providerId) {
   $('#dialog-title').textContent = guide.title;
   $('#dialog-description').textContent = guide.description;
   $('#dialog-steps').innerHTML = guide.steps.map(step => `<li>${esc(step)}</li>`).join('');
-  $('#dialog-command').textContent = guide.command ?? 'No command required';
+  const keyResource = ['kimi-personal-membership','zai-coding-plan','minimax-token-plan'].includes(providerId);
+  $('#dialog-command').innerHTML = keyResource ? '<label>Official subscription API key<input id="secure-provider-key" type="password" autocomplete="off" placeholder="Stored in your operating-system vault"></label>' : esc(guide.command ?? 'No command required');
   $('#copy-command').dataset.command = guide.command ?? '';
+  $('#copy-command').dataset.credentialResource = keyResource ? providerId : '';
+  $('#copy-command').textContent = keyResource ? 'Connect securely' : 'Copy command';
   $('#connection-dialog').showModal();
 }
 
@@ -572,6 +607,18 @@ async function boot() {
         } catch (_) { /* the next durable event retries */ }
       }, 140);
     });
+    if (listen) await listen('batai://ollama-pull-progress', event => {
+      const {modelId,progress}=event.payload ?? {};
+      if (!modelId) return;
+      pullProgress.set(modelId,progress);
+      renderResources();
+      if (progress?.status === 'success') setTimeout(async () => {
+        pullProgress.delete(modelId);
+        await refreshLocalAi();
+        await refreshSnapshot();
+      },500);
+    });
+    refreshLocalAi().catch(() => {});
   } catch (error) {
     $('.runtime-state strong').textContent = 'Runtime offline';
     $('.runtime-state>i').style.background = 'var(--red)';
@@ -583,7 +630,15 @@ $$('[data-view]').forEach(button => button.addEventListener('click', () => switc
 $$('[data-view-link]').forEach(button => button.addEventListener('click', () => switchView(button.dataset.viewLink)));
 $('#open-accounts').addEventListener('click', () => switchView('accounts'));
 $('#refresh-providers').addEventListener('click', async () => { providers = await loadProviders(); renderProviders(); renderOverview(); renderResources(); });
-$('#copy-command').addEventListener('click', () => navigator.clipboard.writeText($('#copy-command').dataset.command || ''));
+$('#copy-command').addEventListener('click', async event => {
+  const resourceId = event.currentTarget.dataset.credentialResource;
+  if (resourceId && invoke) {
+    const input = $('#secure-provider-key');
+    await invoke('set_resource_credential',{resourceId,secret:input.value});
+    input.value=''; $('#connection-dialog').close(); providers=await loadProviders(); renderProviders(); renderResources();
+  } else navigator.clipboard.writeText(event.currentTarget.dataset.command || '');
+});
+$('#refresh-local-ai').addEventListener('click', () => refreshLocalAi().catch(() => {}));
 $('#inspector-back').addEventListener('click', renderProjectInspector);
 $('#toggle-org-edit').addEventListener('click', event => {
   organizationEditMode = !organizationEditMode;
@@ -597,6 +652,11 @@ $('#create-agent').addEventListener('click', () => { populateAgentForm(); $('#ag
 $('#add-relationship').addEventListener('click', () => { populateRelationshipForm(); $('#relationship-dialog').showModal(); });
 $$('[data-close-dialog]').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
 $('#agent-form').elements.seniority.addEventListener('change', updateFunctionOptions);
+$('#agent-form').elements.assignment.addEventListener('change', event => {
+  const automatic = event.target.value === 'AUTO';
+  $('#automatic-intelligence').hidden = !automatic;
+  $('#explicit-intelligence').hidden = automatic;
+});
 $('#agent-form').addEventListener('submit', async event => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -606,9 +666,9 @@ $('#agent-form').addEventListener('submit', async event => {
     await sendMutation({type:'CREATE_AGENT',data:{
       id:null,name:form.elements.name.value || null,seniority:form.elements.seniority.value,
       function:functionId,department:functionPolicy.department,reportsTo:form.elements.reportsTo.value || null,
-      lifecycle:form.elements.lifecycle.value,authority:'WORKER',provider:form.elements.provider.value,model:form.elements.model.value,
+      lifecycle:form.elements.lifecycle.value,authority:'WORKER',provider:form.elements.assignment.value === 'AUTO' ? 'auto' : form.elements.provider.value,model:form.elements.assignment.value === 'AUTO' ? 'auto' : form.elements.model.value,
       reasoningEffort:'medium',permissions:['READ_WORKSPACE','WRITE_WORKSPACE','RUN_COMMANDS'],
-      intelligencePolicy:{assignment:'AUTO',preferredProviders:[],allowedModels:[],allowPayg:false,minimumCapability:null}
+      intelligencePolicy:{assignment:form.elements.assignment.value,preferredProviders:[form.elements.preferLocal.checked ? 'ollama' : null,form.elements.preferSubscription.checked ? 'kimi-code' : null,form.elements.preferSubscription.checked ? 'zai-coding' : null,form.elements.preferSubscription.checked ? 'minimax-token' : null].filter(Boolean),allowedModels:[],allowPayg:form.elements.allowAgentPayg.checked,minimumCapability:null}
     }}, 'Created from Organization Editor');
     $('#agent-dialog').close();
   } catch (error) { $('#agent-form-error').textContent = error.message; }
@@ -657,6 +717,18 @@ $('#policy-form').addEventListener('submit', async event => {
     await sendMutation({type:'UPDATE_PROJECT_POLICY',data:{policy}}, 'Updated project governance policy');
     $('#policy-status').textContent = 'Saved';
   } catch (error) { $('#policy-status').textContent = error.message; }
+});
+$('#economic-policy-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!invoke) return;
+  const form=event.currentTarget;
+  const policy={...(snapshot.economicPolicy ?? {}),preferLocal:form.elements.preferLocal.checked,
+    preferSubscription:form.elements.preferSubscription.checked,quotaConservationMode:form.elements.quotaConservationMode.checked,
+    allowPayg:form.elements.economicAllowPayg.checked,minCapabilityMargin:Number(form.elements.minCapabilityMargin.value),
+    maxPaygPerTask:form.elements.maxPaygPerTask.value === '' ? null : Number(form.elements.maxPaygPerTask.value),
+    forbiddenProviders:snapshot.economicPolicy?.forbiddenProviders ?? [],allowAutomaticProviderChange:false};
+  try { await invoke('update_economic_policy',{policy}); snapshot.economicPolicy=policy; $('#economic-policy-status').textContent='Saved'; }
+  catch(error){ $('#economic-policy-status').textContent=String(error); }
 });
 $$('#inspector-tabs [data-tab]').forEach(button => button.addEventListener('click', () => {
   inspectorTab = button.dataset.tab;

@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::runtime::{
+    benchmark::{BenchmarkResult, LocalModelCatalogEntry, ModelFitAssessment},
+    economic::{EconomicPolicy, ResourceProfile, RoutingDecision},
     execution_provider::UsageSnapshot,
     governance::GovernanceSnapshot,
     organization::{CapabilityProfile, OrganizationRelationship},
@@ -191,6 +193,15 @@ pub struct GodView {
     pub pending_decisions: Option<usize>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelView {
+    pub catalog: LocalModelCatalogEntry,
+    pub fit: ModelFitAssessment,
+    pub installed: Option<bool>,
+    pub benchmark: Option<BenchmarkResult>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
@@ -203,6 +214,16 @@ pub struct AppSnapshot {
     pub activity: Vec<ActivityView>,
     pub hierarchy_warnings: Vec<String>,
     pub governance: GovernanceSnapshot,
+    #[serde(default)]
+    pub hardware: Option<crate::runtime::hardware::HardwareProfile>,
+    #[serde(default)]
+    pub local_models: Vec<LocalModelView>,
+    #[serde(default)]
+    pub intelligence_resources: Vec<ResourceProfile>,
+    #[serde(default)]
+    pub economic_policy: EconomicPolicy,
+    #[serde(default)]
+    pub routing_decisions: Vec<RoutingDecision>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -14,6 +14,9 @@ type AgentGuards = Vec<(String, OwnedMutexGuard<()>)>;
 
 use super::{
     agents::AgentRegistry,
+    economic::{
+        EconomicPolicy, QuotaAwareEconomicRouter, RoutingOutcome, TaskRequirements, TaskRisk,
+    },
     errors::{Result, RuntimeError},
     events::EventEngine,
     execution_provider::provider_failure,
@@ -38,6 +41,7 @@ pub struct TaskEngine {
     unknown_quota_retry: Duration,
     worktrees: Option<super::worktrees::WorktreeManager>,
     recovery: Option<RecoveryEngine>,
+    economic_routing: bool,
 }
 
 impl TaskEngine {
@@ -58,6 +62,7 @@ impl TaskEngine {
             unknown_quota_retry,
             worktrees: None,
             recovery: None,
+            economic_routing: false,
         }
     }
 
@@ -68,6 +73,11 @@ impl TaskEngine {
 
     pub fn with_recovery(mut self, recovery: RecoveryEngine) -> Self {
         self.recovery = Some(recovery);
+        self
+    }
+
+    pub fn with_economic_routing(mut self) -> Self {
+        self.economic_routing = true;
         self
     }
 
@@ -321,6 +331,98 @@ impl TaskEngine {
             .agents
             .get(&agent_id)?
             .ok_or_else(|| RuntimeError::AgentNotFound(agent_id.clone()))?;
+        let configured_intelligence = (
+            agent.provider.clone(),
+            agent.model.clone(),
+            agent.reasoning_effort.clone(),
+        );
+        let mut routing_decision = None;
+        if self.economic_routing
+            && agent.intelligence_policy.assignment == super::organization::ModelAssignment::Auto
+            && agent.provider.eq_ignore_ascii_case("auto")
+        {
+            let function = agent
+                .with_backfilled_organization()
+                .function
+                .unwrap_or(super::organization::AgentFunction::GenericSoftwareAgent);
+            let complexity = task
+                .extra
+                .get("complexity")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(50)
+                .min(100) as u8;
+            let risk = match task.extra.get("risk").and_then(serde_json::Value::as_str) {
+                Some("LOW") => TaskRisk::Low,
+                Some("HIGH") => TaskRisk::High,
+                Some("CRITICAL") => TaskRisk::Critical,
+                _ => TaskRisk::Medium,
+            };
+            let requirements = TaskRequirements {
+                function,
+                complexity,
+                risk,
+                context_tokens: task
+                    .extra
+                    .get("context_tokens")
+                    .and_then(serde_json::Value::as_u64),
+                requires_tools: function.is_coding(),
+                requires_worktree: function.is_coding(),
+                priority: task
+                    .extra
+                    .get("priority")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(50)
+                    .min(100) as u8,
+                ..TaskRequirements::default()
+            };
+            let mut policy = self
+                .store
+                .economic_policy()
+                .unwrap_or_else(|_| EconomicPolicy::default());
+            policy.allow_payg &= agent.intelligence_policy.allow_payg;
+            if !agent.intelligence_policy.preferred_providers.is_empty() {
+                let preferred = agent
+                    .intelligence_policy
+                    .preferred_providers
+                    .iter()
+                    .map(|value| value.to_ascii_lowercase())
+                    .collect::<HashSet<_>>();
+                for resource in self.store.list_intelligence_resources()? {
+                    if !preferred.contains(&resource.provider.to_ascii_lowercase()) {
+                        policy
+                            .forbidden_providers
+                            .insert(resource.provider.to_ascii_lowercase());
+                    }
+                }
+            }
+            let resources = self.store.list_intelligence_resources()?;
+            let decision = QuotaAwareEconomicRouter.route(
+                &task.id,
+                &requirements,
+                &resources,
+                &policy,
+                chrono::Utc::now(),
+            );
+            self.store.save_routing_decision(&decision)?;
+            if decision.outcome == RoutingOutcome::NoSuitableResource {
+                return Err(RuntimeError::ResourceUnavailable {
+                    agent_id: agent_id.clone(),
+                    status: "NO_SUITABLE_RESOURCE".into(),
+                    reset_at: None,
+                });
+            }
+            agent.provider = decision
+                .selected_provider
+                .clone()
+                .expect("selected provider");
+            agent.model = decision.selected_model.clone().unwrap_or_default();
+            agent.reasoning_effort = decision
+                .reasoning_effort
+                .clone()
+                .unwrap_or_else(|| "MEDIUM".into())
+                .to_ascii_lowercase();
+            routing_decision = Some(decision);
+        }
         let mut binding = None;
         let coding_function = agent
             .with_backfilled_organization()
@@ -328,9 +430,16 @@ impl TaskEngine {
             .is_some_and(super::organization::AgentFunction::is_coding);
         if coding_function || super::worktrees::role_requires_worktree(&agent.role_template) {
             if let Some(manager) = &self.worktrees {
-                let before = agent.clone();
+                let before = self
+                    .agents
+                    .get(&agent_id)?
+                    .ok_or_else(|| RuntimeError::AgentNotFound(agent_id.clone()))?;
                 let created = manager.ensure(&agent_id, &task.id)?;
                 agent.worktree = Some(created.path.to_string_lossy().into_owned());
+                let mut persisted_after = agent.clone();
+                persisted_after.provider = configured_intelligence.0.clone();
+                persisted_after.model = configured_intelligence.1.clone();
+                persisted_after.reasoning_effort = configured_intelligence.2.clone();
                 if let Some(recovery) = &self.recovery {
                     let mut journal = recovery.prepare(
                         "ASSIGN_WORKTREE_METADATA",
@@ -339,7 +448,7 @@ impl TaskEngine {
                         0,
                         0,
                         vec![],
-                        vec![agent_db_entity(Some(before), Some(agent.clone()))?],
+                        vec![agent_db_entity(Some(before), Some(persisted_after))?],
                         None,
                         Some(task.id.clone()),
                     )?;
@@ -350,7 +459,7 @@ impl TaskEngine {
                     }
                     recovery.commit(&mut journal)?;
                 } else {
-                    self.agents.register(&agent)?;
+                    self.agents.register(&persisted_after)?;
                 }
                 self.events.publish(
                     if created.reused {
@@ -391,6 +500,18 @@ impl TaskEngine {
             .agents
             .get(&agent_id)?
             .ok_or_else(|| RuntimeError::AgentNotFound(agent_id.clone()))?;
+        if let Some(decision) = &routing_decision {
+            agent.provider = decision
+                .selected_provider
+                .clone()
+                .expect("selected decision has provider");
+            agent.model = decision.selected_model.clone().unwrap_or_default();
+            agent.reasoning_effort = decision
+                .reasoning_effort
+                .clone()
+                .unwrap_or_else(|| "MEDIUM".into())
+                .to_ascii_lowercase();
+        }
         if agent.status == AgentStatus::Ready {
             self.agents
                 .transition(&agent_id, AgentStatus::Running, Some(&task.id))?;
@@ -409,7 +530,8 @@ impl TaskEngine {
             "execution_state":"running","provider":agent.provider,"session_id":session.provider_session_id,
             "worktree":binding.as_ref().map(|b| b.path.to_string_lossy().into_owned()),
             "branch":binding.as_ref().map(|b| b.branch.clone()),"base_commit":binding.as_ref().map(|b| b.base_commit.clone()),
-            "starting_head":binding.as_ref().map(|b| b.starting_head.clone()),"started_at":chrono::Utc::now().to_rfc3339()
+            "starting_head":binding.as_ref().map(|b| b.starting_head.clone()),"started_at":chrono::Utc::now().to_rfc3339(),
+            "routing_decision":routing_decision.as_ref().map(|decision| serde_json::json!({"id":decision.id,"resource_id":decision.selected_resource_id,"reasons":decision.reasons}))
         }))?;
         self.events.publish(
             if resumed_session {
@@ -512,7 +634,8 @@ impl TaskEngine {
                     "execution_state":"completed","provider":agent.provider,"session_id":returned_session_id,
                     "turn_id":result.get("turn_id"),"process_id":result.pointer("/provider_metadata/process_pid"),
                     "worktree":agent.worktree,"ending_head":ending_head,
-                    "changed_files":result.get("changed_files"),"completed_at":chrono::Utc::now().to_rfc3339()
+                    "changed_files":result.get("changed_files"),"completed_at":chrono::Utc::now().to_rfc3339(),
+                    "routing_decision":routing_decision.as_ref().map(|decision| serde_json::json!({"id":decision.id,"resource_id":decision.selected_resource_id,"reasons":decision.reasons}))
                 }))?;
                 self.events.publish(EventType::ProviderTurnCompleted, agent_id.clone(), None, Some(task.id.clone()),
                     serde_json::json!({"provider":agent.provider,"session_id":returned_session_id,"turn_id":result.get("turn_id")}))?;

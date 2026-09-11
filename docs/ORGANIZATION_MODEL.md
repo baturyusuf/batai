@@ -39,6 +39,10 @@ Authority and permissions are also separate from seniority. A Principal Engineer
 
 The initial configurable recommendation policy uses a function-relevant dimension rather than one global model title. Coding can recommend one level while planning recommends another. Recommendations are candidates, not scientific truth, and are constrained by valid function/seniority combinations.
 
+Capability evidence retains its source (`EXTERNAL_BENCHMARK`, `BATAI_BENCHMARK`, `REAL_TASK_HISTORY`, `MANUAL` or `UNKNOWN`), timestamp, sample count and optional hardware fingerprint. Local automatic role recommendations are capped at L4 Senior; Staff, Principal and Director placement remains governance-mediated.
+
+`IntelligencePolicy.assignment = AUTO` is activated for new agents through provider `auto`. Preferred local/subscription sources and PAYG permission constrain the economic router. Explicit legacy agents retain their provider/model unchanged. A routing decision belongs to a task attempt, not to the agent's durable organizational identity.
+
 ## Organization snapshot and telemetry
 
 The desktop receives one initial organization snapshot containing virtual GOD metadata, agents, reporting relationships, tasks, active workflow edges, hierarchy warnings, project metrics, resource summaries and a recent observable activity trace. Runtime events then trigger a debounced refresh while preserving mode, selection and viewport.
@@ -63,4 +67,4 @@ The Inspector separates organizational identity from assigned intelligence and p
 
 ## Current boundaries
 
-Meeting-derived graph groups and live suspended provider approvals are not implemented. Provider event vocabularies do not yet expose reliable reading/testing distinctions for every provider. Energy estimates, full model benchmarking and hidden reasoning are outside this slice.
+Meeting-derived graph groups are not implemented. Provider event vocabularies do not yet expose reliable reading/testing distinctions for every provider. Energy estimates, broad leaderboard benchmarking and hidden reasoning remain outside the product boundary; the local suite measures only Batai worker fit.

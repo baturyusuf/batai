@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use super::errors::Result;
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(
@@ -152,6 +152,30 @@ pub fn migrate(connection: &mut Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_operation_journal_phase
           ON operation_journal(phase, updated_at);
+        "#,
+    )?;
+    apply(
+        connection,
+        9,
+        r#"
+        CREATE TABLE IF NOT EXISTS intelligence_resources (
+          id TEXT PRIMARY KEY, provider TEXT NOT NULL, billing_mode TEXT NOT NULL,
+          status TEXT NOT NULL, profile_json TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS model_benchmarks (
+          id TEXT PRIMARY KEY, model_id TEXT NOT NULL, hardware_fingerprint TEXT NOT NULL,
+          suite_version INTEGER NOT NULL, result_json TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_model_benchmarks_identity
+          ON model_benchmarks(model_id, hardware_fingerprint, created_at);
+        CREATE TABLE IF NOT EXISTS routing_decisions (
+          id TEXT PRIMARY KEY, task_id TEXT NOT NULL, resource_id TEXT,
+          outcome TEXT NOT NULL, decision_json TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_routing_task ON routing_decisions(task_id, created_at);
+        CREATE TABLE IF NOT EXISTS economic_policy (
+          scope TEXT PRIMARY KEY, policy_json TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         "#,
     )?;
     Ok(())

@@ -9,8 +9,13 @@ The Rust runtime executes agents through provider-neutral sessions and normalize
 | Codex | Official `codex app-server` JSONL protocol over stdio | Persisted App Server thread ID; `thread/resume` after restart | `turn/interrupt` | ChatGPT subscription rate-limit snapshot plus per-turn tokens |
 | Claude Code | Official non-interactive CLI JSON output | Persisted CLI session ID; `--resume` | Supervised child-process termination | Per-result tokens/cost when exposed; quota remains unknown |
 | Ollama | Local HTTP API (`/api/chat`, `/api/tags`) | Persisted conversation messages | Request/task cancellation boundary | Local token counters; no subscription cost |
+| Kimi Code | Official OpenAI-compatible coding endpoint | Persisted Batai message session | Attempt boundary | Subscription tokens; quota unknown unless officially reported |
+| Z.AI Coding Plan | Dedicated OpenAI-compatible coding endpoint | Persisted Batai message session | Attempt boundary | Subscription tokens; plan use marked for review |
+| MiniMax Token Plan | Official OpenAI-compatible endpoint with plan key | Persisted Batai message session | Attempt boundary | Subscription tokens; plan quota only when officially reported |
 
 There is no silent provider fallback. A task configured for Codex, Claude Code or Ollama remains on that provider unless an explicit policy or user action changes the agent configuration. This prevents duplicate mutations and unexpected billing.
+
+Provider and economic resource are separate identities. Shared OpenAI-compatible HTTP mechanics do not erase provider-specific auth, verified model IDs, quota semantics, errors or terms. Subscription keys use the OS credential vault (or explicit read-only environment fallback); resource profiles contain no secrets. Automatic agents are routed once before dispatch and never switched mid-turn. See [Economic Routing](ECONOMIC_ROUTING.md).
 
 ## Normalized result contract
 

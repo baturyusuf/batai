@@ -1,8 +1,12 @@
 pub mod agents;
+pub mod benchmark;
+pub mod credentials;
+pub mod economic;
 pub mod errors;
 pub mod events;
 pub mod execution_provider;
 pub mod governance;
+pub mod hardware;
 pub mod migrations;
 pub mod organization;
 pub mod recovery;
@@ -26,8 +30,8 @@ use crate::domain::{
     PerformanceSummary, ProjectSummary, ResourceSummary, TaskView, UsageSummary,
 };
 use crate::providers::{
-    claude_code::ClaudeCodeProvider, codex_app_server::CodexAppServerProvider,
-    ollama::OllamaProvider,
+    claude_code::ClaudeCodeProvider, codex_app_server::CodexAppServerProvider, kimi_code,
+    minimax_token, ollama::OllamaProvider, zai_coding,
 };
 use agents::AgentRegistry;
 use errors::Result;
@@ -77,6 +81,56 @@ impl BataiRuntime {
             Arc::new(ClaudeCodeProvider::default()),
         );
         providers.insert("ollama".into(), Arc::new(OllamaProvider::default()));
+        let credentials: Arc<dyn credentials::CredentialStore> =
+            Arc::new(credentials::DefaultCredentialStore::default());
+        providers.insert(
+            "kimi-code".into(),
+            Arc::new(kimi_code::provider(credentials.clone())),
+        );
+        providers.insert(
+            "zai-coding".into(),
+            Arc::new(zai_coding::provider(credentials.clone())),
+        );
+        providers.insert(
+            "minimax-token".into(),
+            Arc::new(minimax_token::provider(credentials.clone())),
+        );
+        let existing = store
+            .list_intelligence_resources()?
+            .into_iter()
+            .map(|resource| resource.id)
+            .collect::<std::collections::HashSet<_>>();
+        let mut built_ins = vec![
+            economic::native_resource_profile(
+                "ollama-local",
+                "ollama",
+                "Ollama Local",
+                economic::BillingMode::Local,
+            ),
+            economic::native_resource_profile(
+                "codex-native",
+                "codex",
+                "Codex / ChatGPT",
+                economic::BillingMode::NativeSubscriptionClient,
+            ),
+            economic::native_resource_profile(
+                "claude-native",
+                "claude",
+                "Claude Code",
+                economic::BillingMode::NativeSubscriptionClient,
+            ),
+            kimi_code::resource_profile(),
+            zai_coding::resource_profile(),
+            minimax_token::resource_profile(),
+        ];
+        for profile in &mut built_ins {
+            if credentials.get(&profile.id).ok().flatten().is_some() {
+                profile.status = "AVAILABLE".into();
+            }
+            if !existing.contains(&profile.id) {
+                store.upsert_intelligence_resource(profile)?;
+            }
+        }
         Self::with_components(root, store, events, agents, governance, providers)
     }
 
@@ -113,6 +167,7 @@ impl BataiRuntime {
             store.clone(),
             events.clone(),
         ));
+        task_engine = task_engine.with_economic_routing();
         if let Ok(manager) = worktrees::WorktreeManager::discover(&root) {
             task_engine = task_engine.with_worktrees(manager);
         }
@@ -439,6 +494,69 @@ impl BataiRuntime {
             usage_by_source: project_usage_by_source,
         };
         let governance = self.governance.snapshot()?;
+        let hardware = hardware::HardwareProfiler.detect();
+        let benchmarks = self.store.list_benchmarks(Some(&hardware.fingerprint))?;
+        let local_models = benchmark::curated_catalog()
+            .into_iter()
+            .map(|catalog| {
+                let fit = benchmark::assess_fit(&catalog, &hardware, 20);
+                let model_benchmark = benchmarks
+                    .iter()
+                    .find(|result| result.model_id == catalog.id)
+                    .cloned();
+                crate::domain::LocalModelView {
+                    catalog,
+                    fit,
+                    installed: None,
+                    benchmark: model_benchmark,
+                }
+            })
+            .collect();
+        let mut intelligence_resources = vec![
+            economic::native_resource_profile(
+                "ollama-local",
+                "ollama",
+                "Ollama Local",
+                economic::BillingMode::Local,
+            ),
+            economic::native_resource_profile(
+                "codex-native",
+                "codex",
+                "Codex / ChatGPT",
+                economic::BillingMode::NativeSubscriptionClient,
+            ),
+            economic::native_resource_profile(
+                "claude-native",
+                "claude",
+                "Claude Code",
+                economic::BillingMode::NativeSubscriptionClient,
+            ),
+            kimi_code::resource_profile(),
+            zai_coding::resource_profile(),
+            minimax_token::resource_profile(),
+        ];
+        for stored in self.store.list_intelligence_resources()? {
+            if let Some(existing) = intelligence_resources
+                .iter_mut()
+                .find(|profile| profile.id == stored.id)
+            {
+                *existing = stored;
+            } else {
+                intelligence_resources.push(stored);
+            }
+        }
+        for profile in &mut intelligence_resources {
+            if let Some(summary) = resources_by_provider.get(&profile.provider) {
+                profile.status = summary.status.clone();
+                profile.current_concurrency = summary.active_agents as u32;
+                profile.quota.used_percent = summary.used_percent;
+                profile.quota.reset_at = summary.reset_at.clone();
+                profile.usage.input_tokens = summary.usage.input_tokens;
+                profile.usage.output_tokens = summary.usage.output_tokens;
+                profile.usage.known_cost = summary.usage.cost;
+                profile.usage.currency = summary.usage.currency.clone();
+            }
+        }
         Ok(AppSnapshot {
             god: GodView {
                 id: "god".into(),
@@ -460,6 +578,11 @@ impl BataiRuntime {
             activity,
             hierarchy_warnings: hierarchy_warnings(&parents),
             governance,
+            hardware: Some(hardware),
+            local_models,
+            intelligence_resources,
+            economic_policy: self.store.economic_policy()?,
+            routing_decisions: self.store.list_routing_decisions(None, 50)?,
         })
     }
 }
