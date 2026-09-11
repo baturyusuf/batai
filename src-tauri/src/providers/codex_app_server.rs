@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
@@ -19,14 +20,21 @@ use tokio::{
 use crate::runtime::{
     errors::{Result, RuntimeError},
     execution_provider::{
-        ExecutionMode, ExecutionProvider, ProviderExecutionResult, ProviderExecutionStatus,
-        ProviderFailure, ProviderSession, UsageSnapshot, UsageSource, UsageState,
+        ExecutionMode, ExecutionProvider, ProviderApprovalDecision, ProviderApprovalHandler,
+        ProviderApprovalRequest, ProviderExecutionResult, ProviderExecutionStatus, ProviderFailure,
+        ProviderSession, UsageSnapshot, UsageSource, UsageState,
     },
     types::{Agent, ResourceStatus, Task},
 };
 
 type PendingResponse = std::result::Result<Value, String>;
-type ApprovalObserver = Arc<dyn Fn(Value) + Send + Sync>;
+#[derive(Debug, Clone)]
+struct ApprovalExecutionContext {
+    agent_id: String,
+    task_id: String,
+    worktree: Option<String>,
+    turn_id: Option<String>,
+}
 
 struct CodexClient {
     _child: Arc<AsyncMutex<Child>>,
@@ -40,7 +48,8 @@ struct CodexClient {
 impl CodexClient {
     async fn spawn(
         executable: &str,
-        approval_observer: Option<ApprovalObserver>,
+        approval_handler: Option<Arc<dyn ProviderApprovalHandler>>,
+        approval_contexts: Arc<Mutex<HashMap<String, ApprovalExecutionContext>>>,
     ) -> std::result::Result<Arc<Self>, ProviderFailure> {
         let mut child = Command::new(executable)
             .args(["app-server", "--listen", "stdio://"])
@@ -88,16 +97,35 @@ impl CodexClient {
                     continue;
                 };
                 if message.get("method").is_some() && message.get("id").is_some() {
-                    if let Some(observer) = &approval_observer {
-                        observer(message.clone());
-                    }
-                    let response = safe_server_request_response(&message);
-                    let mut writer = stdin.lock().await;
-                    let _ = writer.write_all(format!("{}\n", response).as_bytes()).await;
-                    let _ = writer.flush().await;
-                    let _ = notifications.send(
-                        json!({"method":"batai/approval/declined","params":{"request":message}}),
-                    );
+                    let handler = approval_handler.clone();
+                    let contexts = approval_contexts.clone();
+                    let writer = stdin.clone();
+                    let notification_sender = notifications.clone();
+                    tokio::spawn(async move {
+                        let (approval_id, decision, response) = resolve_server_request(
+                            &message,
+                            process_id,
+                            &contexts,
+                            handler.as_deref(),
+                        )
+                        .await;
+                        let result = async {
+                            let mut stdin = writer.lock().await;
+                            stdin
+                                .write_all(format!("{}\n", response).as_bytes())
+                                .await?;
+                            stdin.flush().await
+                        }
+                        .await
+                        .map_err(|error| error.to_string());
+                        if let (Some(handler), Some(approval_id)) = (handler, approval_id) {
+                            handler.response_result(&approval_id, result.clone());
+                        }
+                        let _ = notification_sender.send(json!({
+                            "method":"batai/providerApproval/responded",
+                            "params":{"request":message,"decision":decision,"sent":result.is_ok()}
+                        }));
+                    });
                 } else if let Some(id) = message.get("id").and_then(Value::as_u64) {
                     if let Ok(mut map) = pending.lock() {
                         if let Some(sender) = map.remove(&id) {
@@ -113,6 +141,15 @@ impl CodexClient {
                     }
                 } else {
                     let _ = notifications.send(message);
+                }
+            }
+            if let Some(handler) = &approval_handler {
+                let sessions = approval_contexts
+                    .lock()
+                    .map(|contexts| contexts.keys().cloned().collect::<Vec<_>>())
+                    .unwrap_or_default();
+                for session_id in sessions {
+                    handler.cancel_session(&session_id);
                 }
             }
             if let Ok(mut map) = pending.lock() {
@@ -190,20 +227,134 @@ impl CodexClient {
     }
 }
 
-fn safe_server_request_response(request: &Value) -> Value {
+fn server_request_response(request: &Value, decision: ProviderApprovalDecision) -> Value {
     let id = request.get("id").cloned().unwrap_or(Value::Null);
+    let protocol_decision = match decision {
+        ProviderApprovalDecision::AllowOnce => "accept",
+        ProviderApprovalDecision::Deny => "decline",
+        ProviderApprovalDecision::Cancel => "cancel",
+    };
+    json!({"id":id,"result":{"decision":protocol_decision}})
+}
+
+#[cfg(test)]
+fn safe_server_request_response(request: &Value) -> Value {
+    server_request_response(request, ProviderApprovalDecision::Cancel)
+}
+
+async fn resolve_server_request(
+    message: &Value,
+    process_id: Option<u32>,
+    contexts: &Arc<Mutex<HashMap<String, ApprovalExecutionContext>>>,
+    handler: Option<&dyn ProviderApprovalHandler>,
+) -> (Option<String>, ProviderApprovalDecision, Value) {
+    let directive = match (
+        handler,
+        parse_approval_request(message, process_id, contexts),
+    ) {
+        (Some(handler), Ok(request)) => Some(handler.handle(request).await),
+        _ => None,
+    };
+    let decision = directive
+        .as_ref()
+        .map_or(ProviderApprovalDecision::Deny, |value| value.decision);
+    (
+        directive.map(|value| value.approval_id),
+        decision,
+        server_request_response(message, decision),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OfficialApprovalParams {
+    thread_id: String,
+    turn_id: String,
+    item_id: String,
+    #[serde(default)]
+    approval_id: Option<String>,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    grant_root: Option<String>,
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+fn parse_approval_request(
+    request: &Value,
+    process_id: Option<u32>,
+    contexts: &Arc<Mutex<HashMap<String, ApprovalExecutionContext>>>,
+) -> std::result::Result<ProviderApprovalRequest, String> {
     let method = request
         .get("method")
         .and_then(Value::as_str)
-        .unwrap_or_default();
-    let result = match method {
-        "item/commandExecution/requestApproval"
-        | "item/fileChange/requestApproval"
-        | "execCommandApproval"
-        | "applyPatchApproval" => json!({"decision":"cancel"}),
-        _ => json!({"decision":"decline"}),
+        .ok_or_else(|| "approval method missing".to_owned())?;
+    if !matches!(
+        method,
+        "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"
+    ) {
+        return Err(format!("unsupported server request: {method}"));
+    }
+    let params: OfficialApprovalParams = serde_json::from_value(
+        request
+            .get("params")
+            .cloned()
+            .ok_or_else(|| "approval params missing".to_owned())?,
+    )
+    .map_err(|error| format!("invalid official approval params: {error}"))?;
+    let context = contexts
+        .lock()
+        .map_err(|_| "approval context lock failed".to_owned())?
+        .get(&params.thread_id)
+        .cloned()
+        .ok_or_else(|| "approval is not bound to an active Batai task".to_owned())?;
+    if context
+        .turn_id
+        .as_deref()
+        .is_some_and(|turn_id| turn_id != params.turn_id)
+    {
+        return Err("approval turn does not match the active turn".into());
+    }
+    let rpc_id = request
+        .get("id")
+        .ok_or_else(|| "approval JSON-RPC id missing".to_owned())?
+        .to_string();
+    let request_id = params.approval_id.as_ref().map_or_else(
+        || format!("{rpc_id}:{}", params.item_id),
+        |approval_id| format!("{rpc_id}:{approval_id}"),
+    );
+    let requested_target = params.grant_root.clone().or(params.cwd.clone());
+    let requested_operation = params.command.clone().unwrap_or_else(|| method.to_owned());
+    let risk = if method == "item/fileChange/requestApproval" {
+        "FILESYSTEM_CHANGE"
+    } else {
+        "COMMAND_EXECUTION"
     };
-    json!({"id":id,"result":result})
+    Ok(ProviderApprovalRequest {
+        provider: "codex".into(),
+        process_id,
+        session_id: params.thread_id.clone(),
+        thread_id: params.thread_id,
+        turn_id: params.turn_id,
+        request_id,
+        agent_id: context.agent_id,
+        task_id: context.task_id,
+        worktree: context.worktree,
+        requested_operation,
+        requested_target,
+        risk: risk.into(),
+        detail: json!({
+            "method":method,
+            "itemId":params.item_id,
+            "reason":params.reason,
+            "command":params.command,
+            "cwd":params.cwd,
+            "grantRoot":params.grant_root,
+        }),
+    })
 }
 
 fn classify_protocol_error(message: &str) -> ProviderFailure {
@@ -222,7 +373,8 @@ pub struct CodexAppServerProvider {
     executable: String,
     client: Arc<AsyncMutex<Option<Arc<CodexClient>>>>,
     active_turns: Arc<Mutex<HashMap<String, String>>>,
-    approval_observer: Option<ApprovalObserver>,
+    approval_handler: Option<Arc<dyn ProviderApprovalHandler>>,
+    approval_contexts: Arc<Mutex<HashMap<String, ApprovalExecutionContext>>>,
 }
 impl Default for CodexAppServerProvider {
     fn default() -> Self {
@@ -235,11 +387,12 @@ impl CodexAppServerProvider {
             executable: executable.into(),
             client: Default::default(),
             active_turns: Default::default(),
-            approval_observer: None,
+            approval_handler: None,
+            approval_contexts: Default::default(),
         }
     }
-    pub fn with_approval_observer(mut self, observer: ApprovalObserver) -> Self {
-        self.approval_observer = Some(observer);
+    pub fn with_approval_handler(mut self, handler: Arc<dyn ProviderApprovalHandler>) -> Self {
+        self.approval_handler = Some(handler);
         self
     }
     async fn client(&self) -> std::result::Result<Arc<CodexClient>, ProviderFailure> {
@@ -247,7 +400,12 @@ impl CodexAppServerProvider {
         if let Some(client) = guard.as_ref() {
             return Ok(client.clone());
         }
-        let client = CodexClient::spawn(&self.executable, self.approval_observer.clone()).await?;
+        let client = CodexClient::spawn(
+            &self.executable,
+            self.approval_handler.clone(),
+            self.approval_contexts.clone(),
+        )
+        .await?;
         *guard = Some(client.clone());
         Ok(client)
     }
@@ -271,6 +429,14 @@ impl CodexAppServerProvider {
             *self.client.lock().await = None;
         }
     }
+
+    fn approval_policy(&self) -> &'static str {
+        if self.approval_handler.is_some() {
+            "on-request"
+        } else {
+            "never"
+        }
+    }
 }
 
 #[async_trait]
@@ -283,7 +449,7 @@ impl ExecutionProvider for CodexAppServerProvider {
             .client()
             .await
             .map_err(|e| RuntimeError::Provider(format!("{e:?}")))?;
-        let result = client.request("thread/start", json!({"model":Self::model(agent),"cwd":Self::cwd(agent),"approvalPolicy":"never","sandbox":"workspace-write","serviceName":"batai"})).await
+        let result = client.request("thread/start", json!({"model":Self::model(agent),"cwd":Self::cwd(agent),"approvalPolicy":self.approval_policy(),"sandbox":"workspace-write","serviceName":"batai"})).await
             .map_err(|e| RuntimeError::Provider(format!("{e:?}")))?;
         let id = result
             .pointer("/thread/id")
@@ -302,7 +468,7 @@ impl ExecutionProvider for CodexAppServerProvider {
             .client()
             .await
             .map_err(|e| RuntimeError::Provider(format!("{e:?}")))?;
-        client.request("thread/resume", json!({"threadId":session_id,"model":Self::model(agent),"cwd":Self::cwd(agent),"approvalPolicy":"never","sandbox":"workspace-write"})).await
+        client.request("thread/resume", json!({"threadId":session_id,"model":Self::model(agent),"cwd":Self::cwd(agent),"approvalPolicy":self.approval_policy(),"sandbox":"workspace-write"})).await
             .map_err(|e| RuntimeError::Provider(format!("{e:?}")))?;
         Ok(ProviderSession {
             id: session_id.into(),
@@ -318,6 +484,18 @@ impl ExecutionProvider for CodexAppServerProvider {
         let started_at = chrono::Utc::now().to_rfc3339();
         let client = self.client().await?;
         let mut notifications = client.subscribe();
+        self.approval_contexts
+            .lock()
+            .map_err(|_| ProviderFailure::Execution("Codex approval context lock failed".into()))?
+            .insert(
+                session_id.into(),
+                ApprovalExecutionContext {
+                    agent_id: agent.id.clone(),
+                    task_id: task.id.clone(),
+                    worktree: agent.worktree.clone(),
+                    turn_id: None,
+                },
+            );
         let started = match client
             .request(
                 "turn/start",
@@ -327,15 +505,29 @@ impl ExecutionProvider for CodexAppServerProvider {
         {
             Ok(value) => value,
             Err(error) => {
+                if let Ok(mut contexts) = self.approval_contexts.lock() {
+                    contexts.remove(session_id);
+                }
                 self.invalidate_client_after(&error).await;
                 return Err(error);
             }
         };
-        let turn_id = started
-            .pointer("/turn/id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| ProviderFailure::MalformedResponse("turn/start omitted turn.id".into()))?
-            .to_owned();
+        let turn_id = match started.pointer("/turn/id").and_then(Value::as_str) {
+            Some(turn_id) => turn_id.to_owned(),
+            None => {
+                if let Ok(mut contexts) = self.approval_contexts.lock() {
+                    contexts.remove(session_id);
+                }
+                return Err(ProviderFailure::MalformedResponse(
+                    "turn/start omitted turn.id".into(),
+                ));
+            }
+        };
+        if let Ok(mut contexts) = self.approval_contexts.lock() {
+            if let Some(context) = contexts.get_mut(session_id) {
+                context.turn_id = Some(turn_id.clone());
+            }
+        }
         self.active_turns
             .lock()
             .map_err(|_| ProviderFailure::Execution("Codex active turn lock failed".into()))?
@@ -394,6 +586,9 @@ impl ExecutionProvider for CodexAppServerProvider {
             .lock()
             .map_err(|_| ProviderFailure::Execution("Codex active turn lock failed".into()))?
             .remove(session_id);
+        if let Ok(mut contexts) = self.approval_contexts.lock() {
+            contexts.remove(session_id);
+        }
         let completed = match completed_result {
             Ok(Ok(value)) => value,
             Ok(Err(error)) | Err(error) => {
@@ -456,6 +651,9 @@ impl ExecutionProvider for CodexAppServerProvider {
             .client()
             .await
             .map_err(|e| RuntimeError::Provider(format!("{e:?}")))?;
+        if let Some(handler) = &self.approval_handler {
+            handler.cancel_session(session_id);
+        }
         client
             .request(
                 "turn/interrupt",
@@ -521,6 +719,28 @@ fn parse_token_usage(value: &Value) -> UsageSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::oneshot;
+
+    struct FakeApprovalHandler {
+        receiver: AsyncMutex<Option<oneshot::Receiver<ProviderApprovalDecision>>>,
+    }
+
+    #[async_trait]
+    impl ProviderApprovalHandler for FakeApprovalHandler {
+        async fn handle(
+            &self,
+            _request: ProviderApprovalRequest,
+        ) -> crate::runtime::execution_provider::ProviderApprovalDirective {
+            let receiver = self.receiver.lock().await.take().expect("one request");
+            crate::runtime::execution_provider::ProviderApprovalDirective {
+                approval_id: "APR-FAKE".into(),
+                decision: receiver.await.expect("decision"),
+            }
+        }
+
+        fn response_result(&self, _approval_id: &str, _result: std::result::Result<(), String>) {}
+        fn cancel_session(&self, _session_id: &str) {}
+    }
     #[test]
     fn approval_requests_are_never_auto_accepted() {
         let response = safe_server_request_response(
@@ -531,6 +751,50 @@ mod tests {
             Some("cancel")
         );
         assert!(!response.to_string().contains("accept"));
+    }
+
+    #[tokio::test]
+    async fn official_approval_request_pauses_and_resumes_the_same_json_rpc_request() {
+        let contexts = Arc::new(Mutex::new(HashMap::from([(
+            "thread-1".into(),
+            ApprovalExecutionContext {
+                agent_id: "agent-a".into(),
+                task_id: "TASK-1".into(),
+                worktree: Some("C:\\worktree".into()),
+                turn_id: Some("turn-1".into()),
+            },
+        )])));
+        let (send, receive) = oneshot::channel();
+        let handler = Arc::new(FakeApprovalHandler {
+            receiver: AsyncMutex::new(Some(receive)),
+        });
+        let message = json!({
+            "id":99,
+            "method":"item/commandExecution/requestApproval",
+            "params":{
+                "threadId":"thread-1","turnId":"turn-1","itemId":"item-1",
+                "startedAtMs":1,"command":"cargo test","cwd":"C:\\worktree"
+            }
+        });
+        let waiting = tokio::spawn({
+            let contexts = contexts.clone();
+            let handler = handler.clone();
+            async move {
+                resolve_server_request(&message, Some(7), &contexts, Some(handler.as_ref())).await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !waiting.is_finished(),
+            "request must remain paused without a decision"
+        );
+        send.send(ProviderApprovalDecision::AllowOnce)
+            .expect("allow");
+        let (approval_id, decision, response) = waiting.await.expect("response");
+        assert_eq!(approval_id.as_deref(), Some("APR-FAKE"));
+        assert_eq!(decision, ProviderApprovalDecision::AllowOnce);
+        assert_eq!(response["id"], 99);
+        assert_eq!(response["result"]["decision"], "accept");
     }
     #[test]
     fn token_usage_is_normalized() {

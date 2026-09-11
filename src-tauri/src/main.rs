@@ -15,6 +15,7 @@ use project::{discover_project_root, ProjectStore};
 use runtime::governance::{
     AuthorityScope, MutationRequest, MutationResult, ProviderApproval, ReviewOutcome,
 };
+use runtime::recovery::{OperationJournal, RecoveryAction};
 
 struct AppState {
     project: ProjectStore,
@@ -114,6 +115,19 @@ fn record_review_outcome(
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn resolve_recovery_operation(
+    operation_id: String,
+    action: RecoveryAction,
+    state: tauri::State<'_, AppState>,
+) -> Result<OperationJournal, String> {
+    state
+        .runtime
+        .governance
+        .resolve_recovery_operation(&operation_id, action)
+        .map_err(|error| error.to_string())
+}
+
 fn main() {
     let project_root = std::env::var_os("BATAI_PROJECT_ROOT")
         .map(PathBuf::from)
@@ -138,6 +152,7 @@ fn main() {
             mutate_organization,
             resolve_god_decision,
             resolve_provider_approval,
+            resolve_recovery_operation,
             record_review_outcome
         ])
         .build(tauri::generate_context!())

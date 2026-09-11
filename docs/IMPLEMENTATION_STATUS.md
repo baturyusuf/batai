@@ -24,7 +24,7 @@
 - Web control plane
 - HTTP control-plane validation for malformed JSON and invalid payloads
 
-Automated test suite: **28 passing Node tests** at the time of this snapshot.
+Automated test suite: **32 passing Node tests** at the time of this snapshot.
 
 ## Implemented and smoke-tested at protocol/process level
 
@@ -69,27 +69,28 @@ Automated test suite: **28 passing Node tests** at the time of this snapshot.
 - Real SVG node-edge Organization Map with Hierarchy, Workflow and Combined modes, semantic edges, cycle/orphan safety, pan/zoom/fit/reset, search and explicit-field filters.
 - Workspace, Task Board, Accounts, Resource Dashboard and tabbed Agent Inspector surfaces.
 - Official connection guidance for Codex, Claude Code, GitHub and Ollama.
-- Real Codex App Server transport with initialize, thread start/resume, turn streaming, interruption, safe approval denial and subscription usage telemetry.
+- Real Codex App Server transport with initialize, thread start/resume, turn streaming, interruption, exact live approval pause/resume and subscription usage telemetry.
 - Supervised Claude Code JSON execution with named/resumable sessions, cancellation and normalized token/cost reporting.
 - Ollama chat/tag HTTP adapter with persisted conversation context and local token counters; private thinking is discarded.
 - Structured process supervision with bounded logs, timeout/cancellation, secret redaction and crash classification.
 - Automatic task-scoped Git worktrees for coding roles, safe reuse/removal, dirty-state inspection and durable execution checkpoints.
-- Conservative crash reconciliation: interrupted mutations become `UNKNOWN_AFTER_CRASH` and require review instead of automatic duplicate execution.
+- Conservative provider crash reconciliation: interrupted turns become `UNKNOWN_AFTER_CRASH` and require review instead of automatic duplicate execution.
+- Restart-safe operation journal for cross-store organization and task/worktree metadata mutations, with durable phases, bounded preimages, fingerprints, forward completion, safe rollback and conflict-to-review behavior.
 - Push-based Tauri runtime events with debounced snapshot refresh in the desktop UI.
 - Typed Rust governance mutations with GOD/Director/Lead/Worker authority, scoped permissions, optimistic organization revisions and fail-closed policy checks.
 - Task-scoped/project/permanent lifecycle, policy-aware Agent Factory, soft termination, one-Director and hierarchy invariants.
 - Persistent collaboration/review/advisory relationships, external organization file watcher, append-only audit and restart-safe mutation-bound GOD decisions.
-- Separate per-request provider approval ledger; unexpected Codex requests are recorded and auto-denied rather than broadened.
+- Separate per-request provider approval ledger with official protocol identity, interactive `Allow once`/`Deny`, bounded expiry, headless fail-closed behavior, cancellation and restart orphaning.
 - Explicit review outcomes and evidence-backed review acceptance metrics, plus typed handoff/meeting foundations.
 - Organization Edit mode, create-agent and relationship forms, explicit mutation confirmations, Decision Ledger, provider approval queue and policy Settings.
-- Seventy-nine passing Rust tests, including an explicit opt-in authenticated Codex App Server smoke and a separate real inference/worktree acceptance test.
+- Ninety-two passing Rust tests, including deterministic approval/recovery fault tests, an explicit opt-in authenticated Codex App Server smoke and a separate real inference/worktree acceptance test.
 - Manual UI smoke at 1440x900 and 1100x720 with no JavaScript console errors.
 
 The Node HTTP control plane remains as a compatibility layer until the Rust task, event, session and resource engines reach feature parity.
 
 ## Next engineering milestones
 
-1. Suspend selected live provider requests while awaiting an exact GOD decision, with bounded expiry and restart fail-closed behavior.
+1. Extend journal-backed recovery to future GitHub lifecycle actions and add richer recovery inspection/diff tooling.
 2. Implement meeting scheduling, event-derived temporary graph groups and automatic safe summaries on the typed meeting foundation.
 3. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
 4. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.

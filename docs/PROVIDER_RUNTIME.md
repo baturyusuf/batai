@@ -33,7 +33,11 @@ CLI processes are launched with structured executable/argument arrays, an explic
 
 Task-run checkpoints store provider/session/turn identity, managed worktree, branch, base and ending commits, process identity when available, changed files and execution state. If a provider disappears after it may have changed files, the run becomes `UNKNOWN_AFTER_CRASH` and the task moves to `REVIEW`. Batai does not automatically rerun that turn.
 
-Codex App Server approval requests are never auto-accepted. The runtime records each unexpected request in the distinct provider approval ledger, responds with `cancel`/`decline`, and records that resolution; the thread uses `workspace-write` with approval policy `never`, so access outside the assigned worktree is not escalated. An already denied request is never retroactively executed. Live suspension while GOD decides is a future protocol slice.
+Codex App Server approvals use the official typed `item/commandExecution/requestApproval` and `item/fileChange/requestApproval` request shapes. In the interactive desktop, a request that passes Batai policy pauses asynchronously while other agents continue. The Decision view shows the exact agent, task, process/session, thread, turn, request, action, target, risk and expiry. `Allow once` returns `accept` to that same JSON-RPC request; `Deny`, expiry, cancellation or unavailable UI returns `decline`/`cancel`. Every request remains independent, including multiple approvals in one turn.
+
+The assigned worktree sandbox and policy checks remain active after approval. Out-of-worktree targets fail closed before prompting. On shutdown the waiter is cancelled; on restart persisted non-terminal approvals become `ORPHANED` and their tasks require review. If App Server exits while a response is being delivered, the record becomes `RESPONSE_UNCERTAIN`; Batai does not claim the response was received or replay the turn.
+
+Task and organization cross-store metadata uses the durable recovery journal. Git worktree creation/removal still has its own scoped Git validation and task-run checkpoints; it is not represented as a distributed filesystem/SQLite transaction.
 
 ## Worktrees
 
@@ -92,3 +96,5 @@ cargo test --manifest-path src-tauri/Cargo.toml real_codex_turn_mutates_only_a_m
 ```
 
 It creates a disposable Git repository, assigns a Batai task to a Codex coding agent, creates a managed worktree, performs an actual inference turn that writes `hello.txt`, and verifies the result, provider/session/turn checkpoint, changed-file list and duplicate suppression. It records the Batai checkout status before and after, and removes the disposable mutation. No credential value is logged.
+
+Approval protocol tests use a deterministic fake App Server as their primary gate: a real provider cannot be relied upon to request a safe approval on demand. They cover same-request pause/resume, denial, expiry, cancellation, duplicate IDs, concurrent agents, restart orphaning and uncertain response delivery. The real acceptance test remains approval-free and deterministic.

@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use super::errors::Result;
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(
@@ -139,6 +139,19 @@ pub fn migrate(connection: &mut Connection) -> Result<()> {
           record_json TEXT NOT NULL, created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_review_subject ON review_outcomes(subject_agent_id, created_at);
+        "#,
+    )?;
+    apply(
+        connection,
+        8,
+        r#"
+        CREATE TABLE IF NOT EXISTS operation_journal (
+          operation_id TEXT PRIMARY KEY, operation_type TEXT NOT NULL,
+          phase TEXT NOT NULL, actor TEXT NOT NULL, target TEXT,
+          record_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_operation_journal_phase
+          ON operation_journal(phase, updated_at);
         "#,
     )?;
     Ok(())

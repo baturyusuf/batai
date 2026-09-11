@@ -15,7 +15,7 @@ The core idea is that the **Director AI operates the organization through Batai 
 - Provider/model/reasoning configuration per agent
 - Typed L0-L7 organizational seniority, function, department and reporting identity independent of model assignment
 - Separate model/effective capability profiles with unknown-safe scores and function-specific assignment recommendations
-- SQLite runtime state and restart recovery
+- SQLite runtime state, durable cross-store operation journal and restart recovery
 - Declarative JSON task queue under `.batai/tasks/`
 - File watcher with debounce and idempotent dispatch
 - Dependency graph and automatic downstream task triggering
@@ -36,7 +36,7 @@ The core idea is that the **Director AI operates the organization through Batai 
 - GitHub CLI issue/PR adapter when `gh` is available
 - MCP-compatible Director control server
 - Live node-edge Organization Map with Hierarchy, Workflow and Combined modes, semantic edges, search, filters, pan/zoom and Agent Inspector
-- Organization Edit mode, Agent Factory form, decision/provider approval queues and project policy settings
+- Organization Edit mode, Agent Factory form, GOD decisions, exact live provider approvals, recovery queue and project policy settings
 - Resource Dashboard with provider health, usage source, quota, token and provider-reported cost summaries
 - Tauri 2 desktop application backed by the Rust runtime
 - Rust bundled-SQLite migrations, typed runtime state and persist-first events
@@ -168,9 +168,10 @@ tests/          orchestration/provider tests
 ## Current limitations
 
 - Claude Code and Ollama require their local executables/services and have not been authenticated on every CI host; their deterministic contracts are tested without credentials.
-- Crash recovery preserves provider/session/worktree evidence and requires review after an uncertain mutation; it does not reattach to an independently surviving OS process.
-- Unexpected Codex provider approval requests are captured and conservatively cancelled. The queue supports per-request review, but live request suspension while waiting for GOD is still planned.
+- Crash recovery preserves provider/session/worktree evidence and requires review after an uncertain provider mutation; it does not reattach to an independently surviving OS process.
+- Interactive Codex approvals pause the exact live request for bounded `Allow once`/`Deny` input. Headless, unsafe, expired and restarted requests fail closed; no blanket authorization is cached.
+- Cross-store organization mutations use a durable operation journal with forward completion, safe rollback and fingerprint-conflict review. Batai does not claim distributed ACID across the filesystem and SQLite.
 - GitHub lifecycle parity and some organizational-memory workflows still come from the Node compatibility layer.
 - Runtime events expose observable execution trace, not hidden model reasoning. Fine-grained activities such as reading versus testing remain generic when a provider does not report them.
 
-See [Organization Model](docs/ORGANIZATION_MODEL.md), [Organization Governance](docs/GOVERNANCE.md), `docs/IMPLEMENTATION_STATUS.md` and `specs/` for the remaining roadmap.
+See [Organization Model](docs/ORGANIZATION_MODEL.md), [Organization Governance](docs/GOVERNANCE.md), [Recovery Model](docs/RECOVERY_MODEL.md), `docs/IMPLEMENTATION_STATUS.md` and `specs/` for the remaining roadmap.

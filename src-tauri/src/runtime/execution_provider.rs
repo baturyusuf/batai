@@ -103,6 +103,45 @@ pub struct ProviderExecutionResult {
     #[serde(default)]
     pub session_metadata: Value,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderApprovalRequest {
+    pub provider: String,
+    pub process_id: Option<u32>,
+    pub session_id: String,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub request_id: String,
+    pub agent_id: String,
+    pub task_id: String,
+    pub worktree: Option<String>,
+    pub requested_operation: String,
+    pub requested_target: Option<String>,
+    pub risk: String,
+    pub detail: Value,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ProviderApprovalDecision {
+    AllowOnce,
+    Deny,
+    Cancel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderApprovalDirective {
+    pub approval_id: String,
+    pub decision: ProviderApprovalDecision,
+}
+
+#[async_trait]
+pub trait ProviderApprovalHandler: Send + Sync {
+    async fn handle(&self, request: ProviderApprovalRequest) -> ProviderApprovalDirective;
+    fn response_result(&self, approval_id: &str, result: std::result::Result<(), String>);
+    fn cancel_session(&self, session_id: &str);
+}
 impl ProviderExecutionResult {
     pub fn into_value(self) -> Value {
         serde_json::to_value(self).unwrap_or(Value::Null)

@@ -14,7 +14,7 @@ const number = value => value === null || value === undefined ? '—' : Number(v
 const percent = value => value === null || value === undefined ? '—' : `${Math.round(value * 10) / 10}%`;
 const departmentLabel = value => value === 'DATA_AI' || value === 'DataAi' ? 'Data & AI' : label(value);
 
-let snapshot = {god:{id:'god',label:'User'},project:{name:'Batai',progress:0,usage:{}},agents:[],tasks:[],relationships:[],resources:[],activity:[],hierarchyWarnings:[],governance:{revision:0,policy:{limits:{maxActiveAgents:8,maxHierarchyDepth:3}},decisions:[],providerApprovals:[],audit:[]}};
+let snapshot = {god:{id:'god',label:'User'},project:{name:'Batai',progress:0,usage:{}},agents:[],tasks:[],relationships:[],resources:[],activity:[],hierarchyWarnings:[],governance:{revision:0,policy:{limits:{maxActiveAgents:8,maxHierarchyDepth:3}},decisions:[],providerApprovals:[],audit:[],recoveryOperations:[],recoveryRequiresReview:0}};
 let providers = [];
 let refreshTimer;
 let inspectorTab = 'overview';
@@ -139,16 +139,21 @@ function renderGovernance() {
   const governance = snapshot.governance ?? {};
   const decisions = governance.decisions ?? [];
   const approvals = governance.providerApprovals ?? [];
+  const recovery = governance.recoveryOperations ?? [];
   const open = openCount(decisions);
   $('#organization-revision').textContent = `rev ${governance.revision ?? 0}`;
   $('#decision-count').textContent = `${open} open`;
   $('#decision-count').classList.toggle('has-open', open > 0);
   const navDecision = $('.nav-item[data-view="decisions"]');
-  navDecision?.classList.toggle('attention', open + openCount(approvals) > 0);
+  navDecision?.classList.toggle('attention', open + approvals.filter(item => item.status === 'PENDING_GOD').length + (governance.recoveryRequiresReview ?? 0) > 0);
   $('#decision-list').innerHTML = decisions.map(decision => `<article class="governance-record"><header><strong>${esc(decision.question)}</strong><span class="record-status ${esc(decision.status.toLowerCase())}">${esc(label(decision.status))}</span></header><p>${esc(decision.impact)}</p><small>${esc(decision.requestedBy)} · ${esc(new Date(decision.createdAt).toLocaleString())}</small>${decision.status === 'OPEN' ? `<div class="record-actions"><button class="approve" data-decision="${esc(decision.id)}" data-resolution="approve">Approve exact change</button><button class="reject" data-decision="${esc(decision.id)}" data-resolution="reject">Reject</button></div>` : ''}</article>`).join('') || '<p class="empty">No organizational decisions.</p>';
-  $('#approval-list').innerHTML = approvals.map(approval => `<article class="governance-record"><header><strong>${esc(label(approval.operation))}</strong><span class="record-status ${esc(approval.status.toLowerCase())}">${esc(label(approval.status))}</span></header><p>${esc(label(approval.provider))} · ${esc(approval.agentId ?? 'Unknown agent')} · ${esc(approval.taskId ?? 'No task')}</p><small>${esc(new Date(approval.createdAt).toLocaleString())}</small>${approval.status === 'PENDING' ? `<div class="record-actions"><button class="approve" data-approval="${esc(approval.id)}" data-resolution="approve">Approve this request</button><button class="reject" data-approval="${esc(approval.id)}" data-resolution="reject">Deny</button></div>` : ''}</article>`).join('') || '<p class="empty">No provider approval requests.</p>';
+  $('#approval-list').innerHTML = approvals.map(approval => { const remaining = approval.expiresAt ? Math.max(0, Math.ceil((new Date(approval.expiresAt) - Date.now()) / 1000)) : null; return `<article class="governance-record"><header><strong>${esc(approval.operation)}</strong><span class="record-status ${esc(approval.status.toLowerCase())}">${esc(label(approval.status))}</span></header><p>${esc(label(approval.provider))} · ${esc(approval.agentId ?? 'Unknown agent')} · ${esc(approval.taskId ?? 'No task')}</p><dl class="record-details"><div><dt>Target</dt><dd>${esc(valueOrDash(approval.requestedTarget))}</dd></div><div><dt>Risk</dt><dd>${esc(label(approval.risk ?? 'Unknown'))}</dd></div><div><dt>Thread / turn</dt><dd>${esc(`${approval.threadId ?? '—'} / ${approval.turnId ?? '—'}`)}</dd></div></dl><small>${esc(new Date(approval.createdAt).toLocaleString())}${remaining == null ? '' : ` · expires in ${remaining}s`}</small>${approval.status === 'PENDING_GOD' ? `<div class="record-actions"><button class="approve" data-approval="${esc(approval.id)}" data-resolution="approve">Allow once</button><button class="reject" data-approval="${esc(approval.id)}" data-resolution="reject">Deny</button></div>` : ''}</article>`; }).join('') || '<p class="empty">No provider approval requests.</p>';
+  $('#recovery-count').textContent = `${governance.recoveryRequiresReview ?? 0} review`;
+  $('#recovery-count').classList.toggle('has-open', (governance.recoveryRequiresReview ?? 0) > 0);
+  $('#recovery-list').innerHTML = recovery.map(operation => `<article class="governance-record"><header><strong>${esc(label(operation.operationType))}</strong><span class="record-status ${esc(operation.currentPhase.toLowerCase())}">${esc(label(operation.currentPhase))}</span></header><p>${esc(operation.actor)} · ${esc(valueOrDash(operation.target))}</p><dl class="record-details"><div><dt>Files</dt><dd>${operation.affectedFiles?.length ?? 0}</dd></div><div><dt>Detected state</dt><dd>${esc(label(operation.currentPhase))}</dd></div><div><dt>Recommendation</dt><dd>${esc(label(operation.recoveryDisposition))}</dd></div></dl>${operation.failureDetails ? `<small>${esc(operation.failureDetails)}</small>` : ''}${operation.currentPhase === 'NEEDS_REVIEW' ? `<div class="record-actions"><button data-recovery="${esc(operation.operationId)}" data-recovery-action="RETRY_COMPLETE">Retry / complete</button><button data-recovery="${esc(operation.operationId)}" data-recovery-action="ACCEPT_CURRENT_STATE">Accept current state</button><button class="reject" data-recovery="${esc(operation.operationId)}" data-recovery-action="ROLLBACK">Rollback if safe</button></div>` : ''}</article>`).join('') || '<p class="empty">No recovery operations.</p>';
   $$('[data-decision]').forEach(button => button.addEventListener('click', () => resolveDecision(button.dataset.decision, button.dataset.resolution === 'approve')));
   $$('[data-approval]').forEach(button => button.addEventListener('click', () => resolveApproval(button.dataset.approval, button.dataset.resolution === 'approve')));
+  $$('[data-recovery]').forEach(button => button.addEventListener('click', () => resolveRecovery(button.dataset.recovery, button.dataset.recoveryAction)));
   renderPolicy();
 }
 
@@ -157,6 +162,7 @@ function renderPolicy() {
   const form = $('#policy-form');
   form.elements.maxActiveAgents.value = policy.limits?.maxActiveAgents ?? 8;
   form.elements.maxHierarchyDepth.value = policy.limits?.maxHierarchyDepth ?? 3;
+  form.elements.providerApprovalTimeoutSeconds.value = policy.providerApprovalTimeoutSeconds ?? 300;
   form.elements.allowPayg.checked = Boolean(policy.allowPayg);
   form.elements.autoAgentCreation.checked = Boolean(policy.autoAgentCreation);
   form.elements.allowedProviders.value = (policy.allowedProviders ?? []).join(', ');
@@ -193,6 +199,12 @@ async function resolveDecision(decisionId, approve) {
 async function resolveApproval(approvalId, approve) {
   if (!invoke) return;
   await invoke('resolve_provider_approval', {approvalId, approve});
+  await refreshSnapshot();
+}
+
+async function resolveRecovery(operationId, action) {
+  if (!invoke) return;
+  await invoke('resolve_recovery_operation', {operationId, action});
   await refreshSnapshot();
 }
 
@@ -323,7 +335,9 @@ function renderProjectInspector() {
   const usage = snapshot.project.usage ?? {};
   const bySource = snapshot.project.usageBySource ?? {};
   const knownCost = usage.cost == null ? 'Unknown' : `${usage.currency ?? ''} ${usage.cost.toFixed(4)}`.trim();
-  $('#inspector-content').innerHTML = `<div class="project-progress-ring"><strong>${snapshot.project.progress}%</strong><span>Weighted progress</span></div><section class="inspector-section"><h3>Tasks</h3><dl>${inspectorMetric('Completed',snapshot.project.completedTasks)}${inspectorMetric('Running',snapshot.project.runningTasks)}${inspectorMetric('Blocked',snapshot.project.blockedTasks)}${inspectorMetric('Remaining',snapshot.project.remainingTasks)}</dl></section><section class="inspector-section"><h3>Agents</h3><dl>${inspectorMetric('Active',snapshot.project.activeAgents)}${inspectorMetric('Waiting',snapshot.project.waitingAgents)}${inspectorMetric('Organization size',snapshot.agents.length)}</dl></section><section class="inspector-section"><h3>Inference</h3><dl>${inspectorMetric('Local',number(bySource.local?.totalTokens))}${inspectorMetric('Subscription',number(bySource.subscription?.totalTokens))}${inspectorMetric('PAYG / API',number(bySource.api?.totalTokens))}${inspectorMetric('Known tokens',number(usage.totalTokens))}${inspectorMetric('Known API spend',knownCost)}</dl></section><p class="metric-note">Unknown provider values are not estimated.</p>`;
+  const recoveryReview = snapshot.governance?.recoveryRequiresReview ?? 0;
+  $('#inspector-content').innerHTML = `<div class="project-progress-ring"><strong>${snapshot.project.progress}%</strong><span>Weighted progress</span></div>${recoveryReview ? `<button class="recovery-health" data-open-recovery>⚠ ${recoveryReview} operation requires review</button>` : ''}<section class="inspector-section"><h3>Tasks</h3><dl>${inspectorMetric('Completed',snapshot.project.completedTasks)}${inspectorMetric('Running',snapshot.project.runningTasks)}${inspectorMetric('Blocked',snapshot.project.blockedTasks)}${inspectorMetric('Remaining',snapshot.project.remainingTasks)}</dl></section><section class="inspector-section"><h3>Agents</h3><dl>${inspectorMetric('Active',snapshot.project.activeAgents)}${inspectorMetric('Waiting',snapshot.project.waitingAgents)}${inspectorMetric('Organization size',snapshot.agents.length)}</dl></section><section class="inspector-section"><h3>Inference</h3><dl>${inspectorMetric('Local',number(bySource.local?.totalTokens))}${inspectorMetric('Subscription',number(bySource.subscription?.totalTokens))}${inspectorMetric('PAYG / API',number(bySource.api?.totalTokens))}${inspectorMetric('Known tokens',number(usage.totalTokens))}${inspectorMetric('Known API spend',knownCost)}</dl></section><p class="metric-note">Unknown provider values are not estimated.</p>`;
+  $('[data-open-recovery]')?.addEventListener('click', () => switchView('decisions'));
 }
 
 function renderInspector(agent) {
@@ -634,6 +648,7 @@ $('#policy-form').addEventListener('submit', async event => {
   const policy = {...current,
     schemaVersion:1,revision:snapshot.governance?.revision ?? 0,
     limits:{maxActiveAgents:Number(form.elements.maxActiveAgents.value),maxHierarchyDepth:Number(form.elements.maxHierarchyDepth.value)},
+    providerApprovalTimeoutSeconds:Number(form.elements.providerApprovalTimeoutSeconds.value),
     allowPayg:form.elements.allowPayg.checked,autoAgentCreation:form.elements.autoAgentCreation.checked,
     permanentAgentsRequireGod:true,allowedProviders:split(form.elements.allowedProviders.value),deniedProviders:split(form.elements.deniedProviders.value),
     productionDeployRequiresGod:true
@@ -665,4 +680,7 @@ $('#director-form').addEventListener('submit', async event => {
 });
 $$('.quick-prompts button').forEach(button => button.addEventListener('click', () => { $('#director-input').value = button.textContent; $('#director-input').focus(); }));
 initializeGraphControls();
+setInterval(() => {
+  if ($('#view-decisions').classList.contains('active')) renderGovernance();
+}, 1000);
 boot();

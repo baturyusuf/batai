@@ -2,20 +2,35 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
 
+use async_trait::async_trait;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 
 use super::{
     agents::AgentRegistry,
     errors::{Result, RuntimeError},
     events::EventEngine,
+    execution_provider::{
+        ProviderApprovalDecision, ProviderApprovalDirective, ProviderApprovalHandler,
+        ProviderApprovalRequest,
+    },
     organization::{
         hierarchy_warnings, AgentFunction, AgentLifecycle, AgentPermission, AuthorityRole,
         Department, IntelligencePolicy, OrganizationRelationship, RelationshipType, Seniority,
+    },
+    recovery::{
+        agent_db_entity, json_bytes, OperationJournal, RecoveryAction, RecoveryEngine,
+        RecoverySummary,
     },
     store::{GovernanceAuditRow, RuntimeStore},
     types::{Agent, AgentStatus, EventType},
@@ -41,6 +56,9 @@ pub enum MutationDisposition {
     Denied,
     PendingGodDecision,
     Conflict,
+    Recovered,
+    RolledBack,
+    RecoveryRequired,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,20 +86,43 @@ impl DecisionStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ProviderApprovalStatus {
-    Pending,
+    Received,
+    PendingGod,
     Approved,
-    Rejected,
+    Denied,
+    Responded,
+    Resolved,
     Expired,
+    Cancelled,
+    Orphaned,
+    ResponseUncertain,
 }
 
 impl ProviderApprovalStatus {
     fn label(self) -> &'static str {
         match self {
-            Self::Pending => "PENDING",
+            Self::Received => "RECEIVED",
+            Self::PendingGod => "PENDING_GOD",
             Self::Approved => "APPROVED",
-            Self::Rejected => "REJECTED",
+            Self::Denied => "DENIED",
+            Self::Responded => "RESPONDED",
+            Self::Resolved => "RESOLVED",
             Self::Expired => "EXPIRED",
+            Self::Cancelled => "CANCELLED",
+            Self::Orphaned => "ORPHANED",
+            Self::ResponseUncertain => "RESPONSE_UNCERTAIN",
         }
+    }
+
+    fn terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Resolved
+                | Self::Expired
+                | Self::Cancelled
+                | Self::Orphaned
+                | Self::ResponseUncertain
+        )
     }
 }
 
@@ -134,6 +175,8 @@ pub struct ProjectGovernancePolicy {
     pub allowed_providers: Vec<String>,
     pub denied_providers: Vec<String>,
     pub production_deploy_requires_god: bool,
+    #[serde(default = "default_provider_approval_timeout")]
+    pub provider_approval_timeout_seconds: u64,
     #[serde(flatten)]
     pub legacy: serde_json::Map<String, Value>,
 }
@@ -150,6 +193,7 @@ impl Default for ProjectGovernancePolicy {
             allowed_providers: Vec::new(),
             denied_providers: Vec::new(),
             production_deploy_requires_god: true,
+            provider_approval_timeout_seconds: default_provider_approval_timeout(),
             legacy: serde_json::Map::new(),
         }
     }
@@ -170,6 +214,10 @@ fn default_max_active() -> usize {
 
 fn default_max_depth() -> usize {
     3
+}
+
+fn default_provider_approval_timeout() -> u64 {
+    300
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -365,12 +413,36 @@ pub struct ProviderApproval {
     pub provider: String,
     pub agent_id: Option<String>,
     pub task_id: Option<String>,
+    #[serde(default)]
+    pub process_id: Option<u32>,
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub thread_id: Option<String>,
+    #[serde(default)]
+    pub turn_id: Option<String>,
+    #[serde(default)]
+    pub request_id: Option<String>,
+    #[serde(default)]
+    pub worktree: Option<String>,
     pub operation: String,
+    #[serde(default)]
+    pub requested_target: Option<String>,
+    #[serde(default)]
+    pub risk: Option<String>,
     pub detail: Value,
     pub status: ProviderApprovalStatus,
     pub created_at: String,
+    #[serde(default)]
+    pub expires_at: Option<String>,
     pub resolved_at: Option<String>,
     pub resolved_by: Option<String>,
+    #[serde(default)]
+    pub responded_at: Option<String>,
+    #[serde(default)]
+    pub decision: Option<ProviderApprovalDecision>,
+    #[serde(default)]
+    pub response_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -418,6 +490,14 @@ pub struct GovernanceSnapshot {
     pub decisions: Vec<GodDecision>,
     pub provider_approvals: Vec<ProviderApproval>,
     pub audit: Vec<AuditRecord>,
+    pub recovery_operations: Vec<OperationJournal>,
+    pub recovery_requires_review: usize,
+}
+
+#[derive(Clone)]
+struct LiveApproval {
+    session_id: String,
+    sender: watch::Sender<Option<ProviderApprovalDecision>>,
 }
 
 #[derive(Clone)]
@@ -427,6 +507,10 @@ pub struct GovernanceService {
     agents: AgentRegistry,
     events: EventEngine,
     mutation_lock: Arc<Mutex<()>>,
+    live_approvals: Arc<Mutex<HashMap<String, LiveApproval>>>,
+    interactive_approvals: Arc<AtomicBool>,
+    approval_shutdown: watch::Sender<bool>,
+    recovery: RecoveryEngine,
 }
 
 impl GovernanceService {
@@ -436,13 +520,22 @@ impl GovernanceService {
         agents: AgentRegistry,
         events: EventEngine,
     ) -> Self {
+        let (approval_shutdown, _) = watch::channel(false);
         Self {
-            root,
+            root: root.clone(),
+            recovery: RecoveryEngine::new(root.clone(), store.clone(), events.clone()),
             store,
             agents,
             events,
             mutation_lock: Arc::new(Mutex::new(())),
+            live_approvals: Arc::new(Mutex::new(HashMap::new())),
+            interactive_approvals: Arc::new(AtomicBool::new(false)),
+            approval_shutdown,
         }
+    }
+
+    pub fn set_interactive_approvals(&self, enabled: bool) {
+        self.interactive_approvals.store(enabled, Ordering::Release);
     }
 
     pub fn snapshot(&self) -> Result<GovernanceSnapshot> {
@@ -453,6 +546,8 @@ impl GovernanceService {
             decisions: self.store.list_governance_records("GOD_DECISION")?,
             provider_approvals: self.store.list_governance_records("PROVIDER_APPROVAL")?,
             audit: self.store.list_governance_audit(150)?,
+            recovery_operations: self.store.list_operation_journals(50)?,
+            recovery_requires_review: self.store.count_operation_phase("NEEDS_REVIEW")?,
         })
     }
 
@@ -461,6 +556,9 @@ impl GovernanceService {
     }
 
     pub fn refresh_external_path(&self, path: &Path) -> Result<()> {
+        if self.recovery.path_in_flight(path)? {
+            return Ok(());
+        }
         let file_name = path.file_name().and_then(|name| name.to_str());
         match file_name {
             Some("config.json") => {
@@ -494,16 +592,22 @@ impl GovernanceService {
             .mutation_lock
             .lock()
             .map_err(|_| RuntimeError::Lock("governance mutation"))?;
-        self.mutate_locked(request, false)
+        self.mutate_locked(request, None)
     }
 
     fn mutate_locked(
         &self,
         request: MutationRequest,
-        god_resolution: bool,
+        god_decision_id: Option<&str>,
     ) -> Result<MutationResult> {
+        if self.recovery.has_blocking_operations()? {
+            return Err(RuntimeError::Governance(
+                "an unfinished recovery must resolve before organization changes can continue"
+                    .into(),
+            ));
+        }
         let organization = self.load_organization()?;
-        let authority = if god_resolution {
+        let authority = if god_decision_id.is_some() {
             AuthorityRole::God
         } else {
             self.resolve_authority(&request.actor.id)?
@@ -575,16 +679,21 @@ impl GovernanceService {
             }
             AuthorityRoute::Allow => {
                 let revision = organization.revision;
-                match self.apply(request.clone(), authority, organization, policy) {
+                match self.apply(
+                    request.clone(),
+                    authority,
+                    organization,
+                    policy,
+                    god_decision_id,
+                ) {
                     Ok(result) => Ok(result),
                     Err(error) => {
-                        self.audit(
-                            &request,
-                            authority,
-                            MutationDisposition::Denied,
-                            None,
-                            revision,
-                        )?;
+                        let disposition = if self.recovery.has_blocking_operations()? {
+                            MutationDisposition::RecoveryRequired
+                        } else {
+                            MutationDisposition::Denied
+                        };
+                        self.audit(&request, authority, disposition, None, revision)?;
                         Err(error)
                     }
                 }
@@ -649,7 +758,7 @@ impl GovernanceService {
                 affected_id: decision.request.mutation.target().map(str::to_owned),
             });
         }
-        let result = self.mutate_locked(decision.request.clone(), true)?;
+        let result = self.mutate_locked(decision.request.clone(), Some(&decision.id))?;
         decision.status = DecisionStatus::Approved;
         decision.resolved_at = Some(now());
         decision.resolution_note = note;
@@ -680,19 +789,26 @@ impl GovernanceService {
             provider,
             agent_id,
             task_id: task_id.clone(),
+            process_id: None,
+            session_id: None,
+            thread_id: None,
+            turn_id: None,
+            request_id: None,
+            worktree: None,
             operation,
+            requested_target: None,
+            risk: None,
             detail: redact_provider_detail(detail),
-            status: ProviderApprovalStatus::Pending,
+            status: ProviderApprovalStatus::PendingGod,
             created_at: now(),
+            expires_at: None,
             resolved_at: None,
             resolved_by: None,
+            responded_at: None,
+            decision: None,
+            response_error: None,
         };
-        self.store.upsert_governance_record(
-            &approval.id,
-            "PROVIDER_APPROVAL",
-            approval.status.label(),
-            &approval,
-        )?;
+        self.persist_provider_approval(&approval)?;
         self.events.publish(
             EventType::ProviderApprovalRequested,
             approval.provider.clone(),
@@ -716,27 +832,52 @@ impl GovernanceService {
             .ok_or_else(|| {
                 RuntimeError::Governance(format!("approval not found: {approval_id}"))
             })?;
-        if approval.status == ProviderApprovalStatus::Pending {
+        let decision = if approve {
+            ProviderApprovalDecision::AllowOnce
+        } else {
+            ProviderApprovalDecision::Deny
+        };
+        if approval.status == ProviderApprovalStatus::PendingGod {
+            let live = self
+                .live_approvals
+                .lock()
+                .map_err(|_| RuntimeError::Lock("live approvals"))?
+                .get(approval_id)
+                .cloned()
+                .ok_or_else(|| {
+                    RuntimeError::Governance(
+                        "approval is no longer bound to a live provider request".into(),
+                    )
+                })?;
             approval.status = if approve {
                 ProviderApprovalStatus::Approved
             } else {
-                ProviderApprovalStatus::Rejected
+                ProviderApprovalStatus::Denied
             };
             approval.resolved_at = Some(now());
             approval.resolved_by = Some("god".into());
-            self.store.upsert_governance_record(
-                &approval.id,
-                "PROVIDER_APPROVAL",
-                approval.status.label(),
-                &approval,
-            )?;
+            approval.decision = Some(decision);
+            self.persist_provider_approval(&approval)?;
+            let _ = live.sender.send(Some(decision));
             self.events.publish(
-                EventType::ProviderApprovalResolved,
+                if approve {
+                    EventType::ProviderApprovalApproved
+                } else {
+                    EventType::ProviderApprovalDenied
+                },
                 "god",
                 Some(approval.id.clone()),
                 approval.task_id.clone(),
                 serde_json::to_value(&approval)?,
             )?;
+        } else if approval.decision == Some(decision) {
+            return Ok(approval);
+        } else {
+            return Err(RuntimeError::Governance(format!(
+                "approval {} is stale or already resolved as {}",
+                approval.id,
+                approval.status.label()
+            )));
         }
         Ok(approval)
     }
@@ -749,8 +890,317 @@ impl GovernanceService {
             .to_owned();
         let approval =
             self.request_provider_approval(provider.into(), None, None, operation, detail)?;
-        self.resolve_provider_approval(&approval.id, false)?;
+        let mut approval = approval;
+        approval.status = ProviderApprovalStatus::Denied;
+        approval.decision = Some(ProviderApprovalDecision::Deny);
+        approval.resolved_at = Some(now());
+        approval.resolved_by = Some("system-policy".into());
+        self.persist_provider_approval(&approval)?;
         Ok(())
+    }
+
+    pub fn reconcile_startup(&self) -> Result<RecoverySummary> {
+        let recovery = self.recovery.reconcile_startup()?;
+        let approvals: Vec<ProviderApproval> =
+            self.store.list_governance_records("PROVIDER_APPROVAL")?;
+        for mut approval in approvals {
+            if approval.status.terminal() {
+                continue;
+            }
+            approval.status = ProviderApprovalStatus::Orphaned;
+            approval.resolved_at = Some(now());
+            approval.resolved_by = Some("startup-reconciliation".into());
+            approval.response_error =
+                Some("the original provider process/request is not live after restart".into());
+            self.persist_provider_approval(&approval)?;
+            if let Some(task_id) = &approval.task_id {
+                if let Ok(task) = self
+                    .store
+                    .set_task_status(task_id, super::types::TaskStatus::Review)
+                {
+                    let _ = self.events.publish(
+                        EventType::ReviewRequired,
+                        "recovery",
+                        Some("director".into()),
+                        Some(task.id),
+                        serde_json::json!({"reason":"orphaned_provider_approval","approvalId":approval.id}),
+                    );
+                }
+            }
+            self.events.publish(
+                EventType::ProviderApprovalOrphaned,
+                "recovery",
+                Some(approval.id.clone()),
+                approval.task_id.clone(),
+                serde_json::to_value(&approval)?,
+            )?;
+        }
+        Ok(recovery)
+    }
+
+    pub fn resolve_recovery_operation(
+        &self,
+        operation_id: &str,
+        action: RecoveryAction,
+    ) -> Result<OperationJournal> {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|_| RuntimeError::Lock("governance mutation"))?;
+        self.recovery.resolve_review(operation_id, action)
+    }
+
+    pub fn shutdown_approvals(&self) {
+        let _ = self.approval_shutdown.send(true);
+        if let Ok(approvals) = self.live_approvals.lock() {
+            for approval in approvals.values() {
+                let _ = approval.sender.send(Some(ProviderApprovalDecision::Cancel));
+            }
+        }
+    }
+
+    fn persist_provider_approval(&self, approval: &ProviderApproval) -> Result<()> {
+        self.store.upsert_governance_record(
+            &approval.id,
+            "PROVIDER_APPROVAL",
+            approval.status.label(),
+            approval,
+        )
+    }
+
+    fn provider_approval_by_id(&self, id: &str) -> Result<Option<ProviderApproval>> {
+        Ok(self
+            .store
+            .list_governance_records::<ProviderApproval>("PROVIDER_APPROVAL")?
+            .into_iter()
+            .find(|approval| approval.id == id))
+    }
+
+    async fn await_provider_approval(
+        &self,
+        request: ProviderApprovalRequest,
+    ) -> ProviderApprovalDirective {
+        let approval_id = exact_approval_id(&request);
+        if let Ok(Some(existing)) = self.provider_approval_by_id(&approval_id) {
+            if existing.status.terminal() || existing.decision.is_some() {
+                return ProviderApprovalDirective {
+                    approval_id,
+                    decision: existing.decision.unwrap_or(ProviderApprovalDecision::Deny),
+                };
+            }
+            if existing.status == ProviderApprovalStatus::PendingGod {
+                let receiver =
+                    self.live_approvals.lock().ok().and_then(|live| {
+                        live.get(&approval_id).map(|entry| entry.sender.subscribe())
+                    });
+                if let Some(receiver) = receiver {
+                    let timeout = approval_remaining_seconds(&existing).max(1);
+                    let decision = self
+                        .await_live_signal(&approval_id, existing, receiver, timeout)
+                        .await;
+                    return ProviderApprovalDirective {
+                        approval_id,
+                        decision,
+                    };
+                }
+                return ProviderApprovalDirective {
+                    approval_id,
+                    decision: ProviderApprovalDecision::Deny,
+                };
+            }
+        }
+        let policy = match self.load_policy() {
+            Ok(policy) => policy,
+            Err(_) => {
+                return ProviderApprovalDirective {
+                    approval_id,
+                    decision: ProviderApprovalDecision::Deny,
+                }
+            }
+        };
+        let timeout_seconds = policy.provider_approval_timeout_seconds.max(1);
+        let expires_at = (Utc::now() + chrono::Duration::seconds(timeout_seconds as i64))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let mut approval = ProviderApproval {
+            id: approval_id.clone(),
+            provider: request.provider.clone(),
+            agent_id: Some(request.agent_id.clone()),
+            task_id: Some(request.task_id.clone()),
+            process_id: request.process_id,
+            session_id: Some(request.session_id.clone()),
+            thread_id: Some(request.thread_id.clone()),
+            turn_id: Some(request.turn_id.clone()),
+            request_id: Some(request.request_id.clone()),
+            worktree: request.worktree.clone(),
+            operation: request.requested_operation.clone(),
+            requested_target: request.requested_target.clone(),
+            risk: Some(request.risk.clone()),
+            detail: redact_provider_detail(request.detail.clone()),
+            status: ProviderApprovalStatus::Received,
+            created_at: now(),
+            expires_at: Some(expires_at),
+            resolved_at: None,
+            resolved_by: None,
+            responded_at: None,
+            decision: None,
+            response_error: None,
+        };
+        if self.persist_provider_approval(&approval).is_err() {
+            return ProviderApprovalDirective {
+                approval_id,
+                decision: ProviderApprovalDecision::Deny,
+            };
+        }
+        let safe_to_prompt = provider_request_within_worktree(&request)
+            && provider_allowed(&policy, &request.provider);
+        if !self.interactive_approvals.load(Ordering::Acquire) || !safe_to_prompt {
+            approval.status = ProviderApprovalStatus::Denied;
+            approval.decision = Some(ProviderApprovalDecision::Deny);
+            approval.resolved_at = Some(now());
+            approval.resolved_by = Some(if safe_to_prompt {
+                "headless-fail-closed".into()
+            } else {
+                "system-policy".into()
+            });
+            let _ = self.persist_provider_approval(&approval);
+            let _ = self.events.publish(
+                EventType::ProviderApprovalDenied,
+                "batai",
+                Some(approval_id.clone()),
+                Some(request.task_id),
+                serde_json::to_value(&approval).unwrap_or(Value::Null),
+            );
+            return ProviderApprovalDirective {
+                approval_id,
+                decision: ProviderApprovalDecision::Deny,
+            };
+        }
+        let (sender, receiver) = watch::channel(None);
+        if let Ok(mut live) = self.live_approvals.lock() {
+            live.insert(
+                approval_id.clone(),
+                LiveApproval {
+                    session_id: request.session_id.clone(),
+                    sender,
+                },
+            );
+        } else {
+            return ProviderApprovalDirective {
+                approval_id,
+                decision: ProviderApprovalDecision::Deny,
+            };
+        }
+        approval.status = ProviderApprovalStatus::PendingGod;
+        let _ = self.persist_provider_approval(&approval);
+        let _ = self.events.publish(
+            EventType::ProviderApprovalWaiting,
+            request.agent_id,
+            Some(approval_id.clone()),
+            Some(request.task_id),
+            serde_json::to_value(&approval).unwrap_or(Value::Null),
+        );
+        let decision = self
+            .await_live_signal(&approval_id, approval, receiver, timeout_seconds)
+            .await;
+        if let Ok(mut live) = self.live_approvals.lock() {
+            live.remove(&approval_id);
+        }
+        ProviderApprovalDirective {
+            approval_id,
+            decision,
+        }
+    }
+
+    async fn await_live_signal(
+        &self,
+        approval_id: &str,
+        mut approval: ProviderApproval,
+        mut receiver: watch::Receiver<Option<ProviderApprovalDecision>>,
+        timeout_seconds: u64,
+    ) -> ProviderApprovalDecision {
+        let mut shutdown = self.approval_shutdown.subscribe();
+        tokio::select! {
+            result = async {
+                loop {
+                    if let Some(decision) = *receiver.borrow() {
+                        break decision;
+                    }
+                    if receiver.changed().await.is_err() {
+                        break ProviderApprovalDecision::Deny;
+                    }
+                }
+            } => {
+                if result == ProviderApprovalDecision::Cancel {
+                    approval.status = ProviderApprovalStatus::Cancelled;
+                    approval.decision = Some(ProviderApprovalDecision::Cancel);
+                    approval.resolved_at = Some(now());
+                    approval.resolved_by = Some("task-or-provider-cancellation".into());
+                    let _ = self.persist_provider_approval(&approval);
+                }
+                result
+            },
+            _ = tokio::time::sleep(Duration::from_secs(timeout_seconds)) => {
+                approval.status = ProviderApprovalStatus::Expired;
+                approval.decision = Some(ProviderApprovalDecision::Deny);
+                approval.resolved_at = Some(now());
+                approval.resolved_by = Some("timeout".into());
+                let _ = self.persist_provider_approval(&approval);
+                let _ = self.events.publish(EventType::ProviderApprovalExpired, "batai", Some(approval_id.to_owned()), approval.task_id.clone(), serde_json::to_value(&approval).unwrap_or(Value::Null));
+                ProviderApprovalDecision::Deny
+            },
+            _ = shutdown.changed() => {
+                approval.status = ProviderApprovalStatus::Cancelled;
+                approval.decision = Some(ProviderApprovalDecision::Cancel);
+                approval.resolved_at = Some(now());
+                approval.resolved_by = Some("runtime-shutdown".into());
+                let _ = self.persist_provider_approval(&approval);
+                ProviderApprovalDecision::Cancel
+            }
+        }
+    }
+
+    fn complete_provider_response(
+        &self,
+        approval_id: &str,
+        result: std::result::Result<(), String>,
+    ) {
+        let Ok(Some(mut approval)) = self.provider_approval_by_id(approval_id) else {
+            return;
+        };
+        match result {
+            Ok(()) => {
+                approval.responded_at = Some(now());
+                if matches!(
+                    approval.status,
+                    ProviderApprovalStatus::Approved | ProviderApprovalStatus::Denied
+                ) {
+                    approval.status = ProviderApprovalStatus::Responded;
+                    let _ = self.persist_provider_approval(&approval);
+                    approval.status = ProviderApprovalStatus::Resolved;
+                    approval.resolved_at.get_or_insert_with(now);
+                }
+                let _ = self.persist_provider_approval(&approval);
+                let _ = self.events.publish(
+                    EventType::ProviderApprovalResolved,
+                    "provider",
+                    Some(approval.id.clone()),
+                    approval.task_id.clone(),
+                    serde_json::to_value(&approval).unwrap_or(Value::Null),
+                );
+            }
+            Err(error) => {
+                approval.status = ProviderApprovalStatus::ResponseUncertain;
+                approval.response_error = Some(
+                    super::super::providers::process_supervisor::redact_secrets(&error),
+                );
+                let _ = self.persist_provider_approval(&approval);
+                if let Some(task_id) = &approval.task_id {
+                    let _ = self
+                        .store
+                        .set_task_status(task_id, super::types::TaskStatus::Review);
+                }
+            }
+        }
     }
 
     pub fn record_review(&self, review: ReviewOutcome) -> Result<()> {
@@ -790,14 +1240,17 @@ impl GovernanceService {
         authority: AuthorityRole,
         mut organization: OrganizationDocument,
         mut policy: ProjectGovernancePolicy,
+        decision_id: Option<&str>,
     ) -> Result<MutationResult> {
-        let affected_id = request.mutation.target().map(str::to_owned);
+        let mut affected_id = request.mutation.target().map(str::to_owned);
         let event_type;
+        let mut agent_change: Option<(Option<Agent>, Agent)> = None;
         match &request.mutation {
             OrganizationMutation::CreateAgent(create) => {
                 let agent = self.build_agent(create, &policy)?;
                 self.validate_agent_change(&agent, None, &policy)?;
-                self.persist_agent(&agent)?;
+                affected_id = Some(agent.id.clone());
+                agent_change = Some((None, agent));
                 event_type = EventType::AgentCreated;
             }
             OrganizationMutation::UpdateIdentity {
@@ -811,7 +1264,7 @@ impl GovernanceService {
                     agent.name = name.trim().to_owned();
                 }
                 agent.title_override.clone_from(title_override);
-                self.persist_agent(&agent)?;
+                agent_change = Some((Some(self.require_agent(agent_id)?), agent));
                 event_type = EventType::AgentUpdated;
             }
             OrganizationMutation::ChangeReportingLine {
@@ -821,7 +1274,7 @@ impl GovernanceService {
                 let mut agent = self.require_agent(agent_id)?;
                 agent.parent_agent_id.clone_from(reports_to);
                 self.validate_agent_change(&agent, Some(agent_id), &policy)?;
-                self.persist_agent(&agent)?;
+                agent_change = Some((Some(self.require_agent(agent_id)?), agent));
                 event_type = EventType::OrganizationChanged;
             }
             OrganizationMutation::ChangeRole {
@@ -838,7 +1291,7 @@ impl GovernanceService {
                     agent.authority = AuthorityRole::Director;
                 }
                 self.validate_agent_change(&agent, Some(agent_id), &policy)?;
-                self.persist_agent(&agent)?;
+                agent_change = Some((Some(self.require_agent(agent_id)?), agent));
                 event_type = EventType::AgentUpdated;
             }
             OrganizationMutation::ChangeProviderPolicy {
@@ -852,7 +1305,7 @@ impl GovernanceService {
                 agent.model = model.trim().to_owned();
                 agent.intelligence_policy = intelligence_policy.clone();
                 self.validate_agent_change(&agent, Some(agent_id), &policy)?;
-                self.persist_agent(&agent)?;
+                agent_change = Some((Some(self.require_agent(agent_id)?), agent));
                 event_type = EventType::AgentUpdated;
             }
             OrganizationMutation::AddRelationship { relationship } => {
@@ -885,12 +1338,35 @@ impl GovernanceService {
                 event_type = EventType::RelationshipRemoved;
             }
             OrganizationMutation::PauseAgent { agent_id } => {
-                self.agents
-                    .transition(agent_id, AgentStatus::Paused, None)?;
+                let before = self.require_agent(agent_id)?;
+                if before.status != AgentStatus::Paused
+                    && !super::agents::transition_allowed(before.status, AgentStatus::Paused)
+                {
+                    return Err(RuntimeError::InvalidAgentTransition {
+                        from: before.status,
+                        to: AgentStatus::Paused,
+                    });
+                }
+                let mut after = before.clone();
+                after.status = AgentStatus::Paused;
+                after.current_task_id = None;
+                agent_change = Some((Some(before), after));
                 event_type = EventType::AgentUpdated;
             }
             OrganizationMutation::ResumeAgent { agent_id } => {
-                self.agents.transition(agent_id, AgentStatus::Ready, None)?;
+                let before = self.require_agent(agent_id)?;
+                if before.status != AgentStatus::Ready
+                    && !super::agents::transition_allowed(before.status, AgentStatus::Ready)
+                {
+                    return Err(RuntimeError::InvalidAgentTransition {
+                        from: before.status,
+                        to: AgentStatus::Ready,
+                    });
+                }
+                let mut after = before.clone();
+                after.status = AgentStatus::Ready;
+                after.current_task_id = None;
+                agent_change = Some((Some(before), after));
                 event_type = EventType::AgentUpdated;
             }
             OrganizationMutation::TerminateAgent { agent_id, .. } => {
@@ -902,11 +1378,16 @@ impl GovernanceService {
                         "the Director cannot be terminated".into(),
                     ));
                 }
-                self.agents
-                    .transition(agent_id, AgentStatus::Terminated, None)?;
-                let mut persisted = agent;
+                if !super::agents::transition_allowed(agent.status, AgentStatus::Terminated) {
+                    return Err(RuntimeError::InvalidAgentTransition {
+                        from: agent.status,
+                        to: AgentStatus::Terminated,
+                    });
+                }
+                let mut persisted = agent.clone();
                 persisted.status = AgentStatus::Terminated;
-                self.persist_agent(&persisted)?;
+                persisted.current_task_id = None;
+                agent_change = Some((Some(agent), persisted));
                 event_type = EventType::AgentTerminated;
             }
             OrganizationMutation::UpdateProjectPolicy {
@@ -923,12 +1404,54 @@ impl GovernanceService {
         organization.revision = organization.revision.saturating_add(1);
         organization.schema_version = 1;
         policy.revision = organization.revision;
-        self.persist_organization(&organization)?;
+        let mut files = Vec::new();
+        let mut db_entities = Vec::new();
+        if let Some((before, after)) = &agent_change {
+            files.push((self.agent_config_path(&after.id), json_bytes(after)?));
+            db_entities.push(agent_db_entity(before.clone(), Some(after.clone()))?);
+        }
+        files.push((
+            self.root.join(".batai/organization.json"),
+            json_bytes(&organization)?,
+        ));
         if matches!(
             request.mutation,
             OrganizationMutation::UpdateProjectPolicy { .. }
         ) {
-            self.persist_policy(&policy)?;
+            files.push((self.root.join(".batai/policies.json"), json_bytes(&policy)?));
+        }
+        let mut journal = self.recovery.prepare(
+            request.mutation.action(),
+            request.actor.id.clone(),
+            affected_id.clone(),
+            request.expected_revision,
+            organization.revision,
+            files,
+            db_entities,
+            decision_id.map(str::to_owned),
+            request.task_id.clone(),
+        )?;
+        if let Err(error) = self.recovery.apply_files(&mut journal) {
+            let rollback = self
+                .recovery
+                .fail_and_rollback(&mut journal, &error.to_string());
+            if let Err(rollback_error) = rollback {
+                return Err(RuntimeError::Governance(format!(
+                    "mutation failed: {error}; recovery failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
+        }
+        if let Err(error) = self.recovery.apply_db(&mut journal) {
+            let rollback = self
+                .recovery
+                .fail_and_rollback(&mut journal, &error.to_string());
+            if let Err(rollback_error) = rollback {
+                return Err(RuntimeError::Governance(format!(
+                    "database mutation failed: {error}; recovery failed: {rollback_error}"
+                )));
+            }
+            return Err(error);
         }
         self.audit(
             &request,
@@ -944,6 +1467,7 @@ impl GovernanceService {
             request.task_id,
             serde_json::json!({"revision":organization.revision,"action":request.mutation.action()}),
         )?;
+        self.recovery.commit(&mut journal)?;
         Ok(MutationResult {
             disposition: MutationDisposition::Applied,
             revision: organization.revision,
@@ -951,6 +1475,13 @@ impl GovernanceService {
             message: "organization mutation applied".into(),
             affected_id,
         })
+    }
+
+    fn agent_config_path(&self, agent_id: &str) -> PathBuf {
+        self.root
+            .join(".batai/agents")
+            .join(agent_id)
+            .join("config.json")
     }
 
     fn route(&self, authority: AuthorityRole, request: &MutationRequest) -> Result<AuthorityRoute> {
@@ -1338,6 +1869,97 @@ impl GovernanceService {
     }
 }
 
+#[async_trait]
+impl ProviderApprovalHandler for GovernanceService {
+    async fn handle(&self, request: ProviderApprovalRequest) -> ProviderApprovalDirective {
+        self.await_provider_approval(request).await
+    }
+
+    fn response_result(&self, approval_id: &str, result: std::result::Result<(), String>) {
+        self.complete_provider_response(approval_id, result);
+    }
+
+    fn cancel_session(&self, session_id: &str) {
+        let live = self
+            .live_approvals
+            .lock()
+            .map(|approvals| {
+                approvals
+                    .values()
+                    .filter(|approval| approval.session_id == session_id)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for approval in live {
+            let _ = approval.sender.send(Some(ProviderApprovalDecision::Cancel));
+        }
+    }
+}
+
+fn exact_approval_id(request: &ProviderApprovalRequest) -> String {
+    let binding = serde_json::json!({
+        "provider":request.provider,
+        "processId":request.process_id,
+        "sessionId":request.session_id,
+        "threadId":request.thread_id,
+        "turnId":request.turn_id,
+        "requestId":request.request_id,
+        "agentId":request.agent_id,
+        "taskId":request.task_id,
+        "worktree":request.worktree,
+        "operation":request.requested_operation,
+        "target":request.requested_target,
+    });
+    format!("APR-{:x}", Sha256::digest(binding.to_string().as_bytes()))
+}
+
+fn approval_remaining_seconds(approval: &ProviderApproval) -> u64 {
+    approval
+        .expires_at
+        .as_deref()
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|deadline| {
+            deadline
+                .signed_duration_since(Utc::now())
+                .num_seconds()
+                .max(0) as u64
+        })
+        .unwrap_or_default()
+}
+
+fn provider_request_within_worktree(request: &ProviderApprovalRequest) -> bool {
+    let Some(worktree) = request.worktree.as_deref() else {
+        return false;
+    };
+    let Some(target) = request.requested_target.as_deref() else {
+        return true;
+    };
+    let target_path = PathBuf::from(target);
+    if !target_path.is_absolute() {
+        return !target_path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir));
+    }
+    !target_path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+        && target_path.starts_with(Path::new(worktree))
+}
+
+fn provider_allowed(policy: &ProjectGovernancePolicy, provider: &str) -> bool {
+    let provider = provider.to_ascii_lowercase();
+    !policy
+        .denied_providers
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case(&provider))
+        && (policy.allowed_providers.is_empty()
+            || policy
+                .allowed_providers
+                .iter()
+                .any(|value| value.eq_ignore_ascii_case(&provider)))
+}
+
 enum AuthorityRoute {
     Allow,
     Deny(String),
@@ -1348,6 +1970,11 @@ fn validate_policy(policy: &ProjectGovernancePolicy) -> Result<()> {
     if policy.limits.max_active_agents == 0 || policy.limits.max_hierarchy_depth == 0 {
         return Err(RuntimeError::Governance(
             "agent and hierarchy limits must be greater than zero".into(),
+        ));
+    }
+    if !(1..=3600).contains(&policy.provider_approval_timeout_seconds) {
+        return Err(RuntimeError::Governance(
+            "provider approval timeout must be between 1 and 3600 seconds".into(),
         ));
     }
     let allowed = policy
@@ -1671,6 +2298,24 @@ mod tests {
         }
     }
 
+    fn approval_request(root: &Path, request_id: &str, agent_id: &str) -> ProviderApprovalRequest {
+        ProviderApprovalRequest {
+            provider: "codex".into(),
+            process_id: Some(42),
+            session_id: format!("thread-{agent_id}"),
+            thread_id: format!("thread-{agent_id}"),
+            turn_id: format!("turn-{agent_id}"),
+            request_id: request_id.into(),
+            agent_id: agent_id.into(),
+            task_id: format!("TASK-{agent_id}"),
+            worktree: Some(root.display().to_string()),
+            requested_operation: "cargo test".into(),
+            requested_target: Some(root.display().to_string()),
+            risk: "COMMAND_EXECUTION".into(),
+            detail: serde_json::json!({"command":"cargo test"}),
+        }
+    }
+
     fn mutation(actor: &str, revision: u64, mutation: OrganizationMutation) -> MutationRequest {
         MutationRequest {
             actor: Actor {
@@ -1751,6 +2396,40 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_policy(&policy).is_err());
+    }
+
+    #[test]
+    fn organization_mutation_waits_for_conflicted_recovery_review() {
+        let harness = harness();
+        let path = harness._root.path().join(".batai/organization.json");
+        let mut journal = harness
+            .service
+            .recovery
+            .prepare(
+                "UPDATE_ORGANIZATION",
+                "god",
+                None,
+                0,
+                1,
+                vec![(path.clone(), b"intended".to_vec())],
+                vec![],
+                None,
+                None,
+            )
+            .unwrap();
+        harness.service.recovery.apply_files(&mut journal).unwrap();
+        fs::write(path, b"external").unwrap();
+        harness.service.recovery.reconcile_startup().unwrap();
+
+        let error = harness
+            .service
+            .mutate(mutation(
+                "director",
+                0,
+                OrganizationMutation::CreateAgent(create_request(AgentLifecycle::Project)),
+            ))
+            .unwrap_err();
+        assert!(error.to_string().contains("unfinished recovery"));
     }
 
     #[test]
@@ -1906,32 +2585,284 @@ mod tests {
         assert!(!harness.service.snapshot().unwrap().audit.is_empty());
     }
 
+    #[tokio::test]
+    async fn provider_approval_is_per_request_and_idempotent() {
+        let harness = harness();
+        harness.service.set_interactive_approvals(true);
+        let request = ProviderApprovalRequest {
+            provider: "codex".into(),
+            process_id: Some(42),
+            session_id: "thread-1".into(),
+            thread_id: "thread-1".into(),
+            turn_id: "turn-1".into(),
+            request_id: "rpc-7".into(),
+            agent_id: "worker".into(),
+            task_id: "TASK-1".into(),
+            worktree: Some(harness._root.path().display().to_string()),
+            requested_operation: "write hello.txt".into(),
+            requested_target: Some(harness._root.path().join("hello.txt").display().to_string()),
+            risk: "FILESYSTEM_CHANGE".into(),
+            detail: serde_json::json!({"path":"hello.txt"}),
+        };
+        let approval_id = exact_approval_id(&request);
+        let service = harness.service.clone();
+        let request_duplicate = request.clone();
+        let waiter = tokio::spawn(async move { service.handle(request).await });
+        for _ in 0..50 {
+            if harness
+                .service
+                .provider_approval_by_id(&approval_id)
+                .unwrap()
+                .is_some_and(|approval| approval.status == ProviderApprovalStatus::PendingGod)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let duplicate_service = harness.service.clone();
+        let duplicate =
+            tokio::spawn(async move { duplicate_service.handle(request_duplicate).await });
+        let resolved = harness
+            .service
+            .resolve_provider_approval(&approval_id, false)
+            .unwrap();
+        assert_eq!(resolved.status, ProviderApprovalStatus::Denied);
+        let directive = waiter.await.unwrap();
+        assert_eq!(directive.decision, ProviderApprovalDecision::Deny);
+        assert_eq!(
+            duplicate.await.unwrap().decision,
+            ProviderApprovalDecision::Deny
+        );
+        assert_eq!(
+            harness
+                .service
+                .snapshot()
+                .unwrap()
+                .provider_approvals
+                .iter()
+                .filter(|approval| approval.id == approval_id)
+                .count(),
+            1
+        );
+        harness.service.response_result(&approval_id, Ok(()));
+        assert_eq!(
+            harness
+                .service
+                .resolve_provider_approval(&approval_id, false)
+                .unwrap()
+                .status,
+            ProviderApprovalStatus::Resolved
+        );
+        assert!(harness
+            .service
+            .resolve_provider_approval(&approval_id, true)
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn provider_approval_headless_and_outside_worktree_fail_closed() {
+        let harness = harness();
+        let request = approval_request(harness._root.path(), "headless", "worker");
+        let id = exact_approval_id(&request);
+        let directive = harness.service.handle(request).await;
+        assert_eq!(directive.decision, ProviderApprovalDecision::Deny);
+        assert_eq!(
+            harness
+                .service
+                .provider_approval_by_id(&id)
+                .unwrap()
+                .unwrap()
+                .resolved_by
+                .as_deref(),
+            Some("headless-fail-closed")
+        );
+
+        harness.service.set_interactive_approvals(true);
+        let mut outside = approval_request(harness._root.path(), "outside", "worker");
+        outside.requested_target = Some(
+            harness
+                ._root
+                .path()
+                .parent()
+                .unwrap()
+                .join("outside-danger")
+                .display()
+                .to_string(),
+        );
+        let outside_id = exact_approval_id(&outside);
+        assert_eq!(
+            harness.service.handle(outside).await.decision,
+            ProviderApprovalDecision::Deny
+        );
+        assert_eq!(
+            harness
+                .service
+                .provider_approval_by_id(&outside_id)
+                .unwrap()
+                .unwrap()
+                .resolved_by
+                .as_deref(),
+            Some("system-policy")
+        );
+
+        let mut traversal = approval_request(harness._root.path(), "traversal", "worker");
+        traversal.requested_target = Some("../outside-danger".into());
+        let traversal_id = exact_approval_id(&traversal);
+        assert_eq!(
+            harness.service.handle(traversal).await.decision,
+            ProviderApprovalDecision::Deny
+        );
+        assert_eq!(
+            harness
+                .service
+                .provider_approval_by_id(&traversal_id)
+                .unwrap()
+                .unwrap()
+                .resolved_by
+                .as_deref(),
+            Some("system-policy")
+        );
+    }
+
+    #[tokio::test]
+    async fn provider_approval_timeout_and_cancellation_are_bounded() {
+        let harness = harness();
+        harness.service.set_interactive_approvals(true);
+        harness
+            .service
+            .persist_policy(&ProjectGovernancePolicy {
+                provider_approval_timeout_seconds: 1,
+                ..ProjectGovernancePolicy::default()
+            })
+            .unwrap();
+        let timeout_request = approval_request(harness._root.path(), "timeout", "worker");
+        let timeout_id = exact_approval_id(&timeout_request);
+        assert_eq!(
+            harness.service.handle(timeout_request).await.decision,
+            ProviderApprovalDecision::Deny
+        );
+        assert_eq!(
+            harness
+                .service
+                .provider_approval_by_id(&timeout_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProviderApprovalStatus::Expired
+        );
+
+        let cancel_request = approval_request(harness._root.path(), "cancel", "worker");
+        let session = cancel_request.session_id.clone();
+        let cancel_id = exact_approval_id(&cancel_request);
+        let service = harness.service.clone();
+        let waiter = tokio::spawn(async move { service.handle(cancel_request).await });
+        for _ in 0..50 {
+            if harness
+                .service
+                .live_approvals
+                .lock()
+                .unwrap()
+                .contains_key(&cancel_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        harness.service.cancel_session(&session);
+        assert_eq!(
+            waiter.await.unwrap().decision,
+            ProviderApprovalDecision::Cancel
+        );
+        assert_eq!(
+            harness
+                .service
+                .provider_approval_by_id(&cancel_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProviderApprovalStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_approvals_are_independent_and_response_failure_is_uncertain() {
+        let harness = harness();
+        harness.service.set_interactive_approvals(true);
+        let request_a = approval_request(harness._root.path(), "a", "worker");
+        let mut request_b = approval_request(harness._root.path(), "b", "agent-b");
+        request_b.session_id = "thread-b".into();
+        request_b.thread_id = "thread-b".into();
+        let id_a = exact_approval_id(&request_a);
+        let id_b = exact_approval_id(&request_b);
+        let service_a = harness.service.clone();
+        let service_b = harness.service.clone();
+        let wait_a = tokio::spawn(async move { service_a.handle(request_a).await });
+        let wait_b = tokio::spawn(async move { service_b.handle(request_b).await });
+        for _ in 0..100 {
+            if harness.service.live_approvals.lock().unwrap().len() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        harness
+            .service
+            .resolve_provider_approval(&id_b, true)
+            .unwrap();
+        assert_eq!(
+            wait_b.await.unwrap().decision,
+            ProviderApprovalDecision::AllowOnce
+        );
+        assert!(
+            !wait_a.is_finished(),
+            "agent A wait must not block or resolve agent B"
+        );
+        harness
+            .service
+            .resolve_provider_approval(&id_a, false)
+            .unwrap();
+        assert_eq!(
+            wait_a.await.unwrap().decision,
+            ProviderApprovalDecision::Deny
+        );
+        harness
+            .service
+            .response_result(&id_b, Err("app server closed with bearer secret".into()));
+        let failed = harness
+            .service
+            .provider_approval_by_id(&id_b)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.status, ProviderApprovalStatus::ResponseUncertain);
+        assert!(!failed.response_error.unwrap().contains("secret"));
+    }
+
     #[test]
-    fn provider_approval_is_per_request_and_idempotent() {
+    fn restart_marks_live_provider_approval_orphaned() {
         let harness = harness();
         let approval = harness
             .service
             .request_provider_approval(
                 "codex".into(),
                 Some("worker".into()),
-                Some("TASK-1".into()),
-                "WRITE_FILE".into(),
-                serde_json::json!({"path":"hello.txt"}),
+                None,
+                "cargo test".into(),
+                serde_json::json!({}),
             )
             .unwrap();
-        let resolved = harness
-            .service
-            .resolve_provider_approval(&approval.id, false)
-            .unwrap();
-        assert_eq!(resolved.status, ProviderApprovalStatus::Rejected);
+        harness.service.reconcile_startup().unwrap();
         assert_eq!(
             harness
                 .service
-                .resolve_provider_approval(&approval.id, true)
+                .provider_approval_by_id(&approval.id)
+                .unwrap()
                 .unwrap()
                 .status,
-            ProviderApprovalStatus::Rejected
+            ProviderApprovalStatus::Orphaned
         );
+        assert!(harness
+            .service
+            .resolve_provider_approval(&approval.id, true)
+            .is_err());
     }
 
     #[test]

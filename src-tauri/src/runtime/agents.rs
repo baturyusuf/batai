@@ -60,7 +60,7 @@ impl AgentRegistry {
         if agent.status == to {
             return Ok(agent);
         }
-        if !allowed(agent.status, to) {
+        if !transition_allowed(agent.status, to) {
             return Err(RuntimeError::InvalidAgentTransition {
                 from: agent.status,
                 to,
@@ -78,7 +78,7 @@ impl AgentRegistry {
     }
 }
 
-fn allowed(from: AgentStatus, to: AgentStatus) -> bool {
+pub fn transition_allowed(from: AgentStatus, to: AgentStatus) -> bool {
     use AgentStatus::*;
     match from {
         Created => matches!(to, Initializing | Terminated),

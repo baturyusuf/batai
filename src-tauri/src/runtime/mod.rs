@@ -5,6 +5,7 @@ pub mod execution_provider;
 pub mod governance;
 pub mod migrations;
 pub mod organization;
+pub mod recovery;
 pub mod scheduler;
 pub mod sessions;
 pub mod store;
@@ -34,6 +35,7 @@ use events::EventEngine;
 use execution_provider::{ExecutionProvider, MockProvider};
 use governance::GovernanceService;
 use organization::{hierarchy_warnings, OrganizationRelationship, RelationshipType};
+use recovery::RecoveryEngine;
 use scheduler::DurableScheduler;
 use sessions::SessionManager;
 use store::RuntimeStore;
@@ -60,14 +62,13 @@ impl BataiRuntime {
         let agents = AgentRegistry::new(store.clone(), events.clone());
         let governance =
             GovernanceService::new(root.clone(), store.clone(), agents.clone(), events.clone());
+        governance.set_interactive_approvals(true);
         let mock = Arc::new(MockProvider::default());
         let mut providers = HashMap::<String, Arc<dyn ExecutionProvider>>::new();
         providers.insert("mock".into(), mock);
-        let approval_governance = governance.clone();
-        let codex =
-            CodexAppServerProvider::default().with_approval_observer(Arc::new(move |request| {
-                let _ = approval_governance.record_provider_auto_denial("codex", request);
-            }));
+        let approval_handler: Arc<dyn execution_provider::ProviderApprovalHandler> =
+            Arc::new(governance.clone());
+        let codex = CodexAppServerProvider::default().with_approval_handler(approval_handler);
         providers.insert("codex".into(), Arc::new(codex.clone()));
         providers.insert("codex-app-server".into(), Arc::new(codex));
         providers.insert("claude".into(), Arc::new(ClaudeCodeProvider::default()));
@@ -107,6 +108,11 @@ impl BataiRuntime {
             sessions.clone(),
             Duration::from_secs(15 * 60),
         );
+        task_engine = task_engine.with_recovery(RecoveryEngine::new(
+            root.clone(),
+            store.clone(),
+            events.clone(),
+        ));
         if let Ok(manager) = worktrees::WorktreeManager::discover(&root) {
             task_engine = task_engine.with_worktrees(manager);
         }
@@ -126,6 +132,7 @@ impl BataiRuntime {
     }
 
     pub async fn start(self: &Arc<Self>) -> Result<()> {
+        self.governance.reconcile_startup()?;
         self.store.reconcile_interrupted()?;
         self.load_agents()?;
         let watcher = TaskWatcher::start(
@@ -164,6 +171,7 @@ impl BataiRuntime {
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        self.governance.shutdown_approvals();
         let watcher = self
             .watcher
             .lock()

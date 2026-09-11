@@ -104,6 +104,11 @@ uppercase_enum!(EventType {
     ProviderTurnFailed,
     ProviderApprovalRequested,
     ProviderApprovalDeclined,
+    ProviderApprovalWaiting,
+    ProviderApprovalApproved,
+    ProviderApprovalDenied,
+    ProviderApprovalExpired,
+    ProviderApprovalOrphaned,
     UsageUpdated,
     WorktreeCreated,
     WorktreeReused,
@@ -121,7 +126,12 @@ uppercase_enum!(EventType {
     AuditRecorded,
     ProviderApprovalResolved,
     ReviewOutcomeRecorded,
-    PolicyChanged
+    PolicyChanged,
+    OperationPrepared,
+    OperationRecovered,
+    OperationCommitted,
+    OperationRolledBack,
+    OperationRecoveryRequired
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

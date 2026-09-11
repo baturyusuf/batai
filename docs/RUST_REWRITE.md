@@ -27,6 +27,8 @@ The Rust rewrite moves Batai from a Node-hosted control-plane prototype to a Tau
 - Provider-neutral execution/session traits and normalized provider result/usage contracts.
 - Real Codex App Server, Claude Code CLI and Ollama HTTP execution adapters.
 - Structured process supervision with cancellation, timeouts, bounded/redacted diagnostics and conservative crash handling.
+- Exact, bounded Codex App Server approval pause/resume with fail-closed headless behavior, per-request identity and restart orphaning.
+- Durable cross-store operation journal with explicit phases, atomic file replacement, SQLite transactions, forward recovery, safe rollback and conflict review.
 - Automatic managed Git worktrees for coding roles and enriched per-run Git/process checkpoints.
 - Session persistence with provider/model/reasoning/worktree/config fingerprints.
 - Persistent resource states and SQLite-backed, deduplicated resource-recheck jobs with restart reconciliation.
@@ -54,12 +56,12 @@ Requirements:
 
 The legacy Node runtime remains in the branch during protocol migration. It provides compatibility and regression tests until the Rust task, event, session and resource engines reach feature parity.
 
-The Rust suite currently contains 63 tests. GitHub Actions validates the Node compatibility suite on Linux and formatting, linting, tests and the desktop build on Windows. Real-provider smoke and mutation-level acceptance tests remain explicitly opt-in.
+The Rust suite currently contains 92 tests. GitHub Actions validates the 32-test Node compatibility suite on Linux and formatting, linting, tests and the desktop build on Windows. Real-provider smoke and mutation-level acceptance tests remain explicitly opt-in.
 
 ## Remaining migration slices
 
 1. Exercise Claude Code and Ollama against installed authenticated/local runtimes.
-2. Port authority, decision ledger, organizational memory and GitHub lifecycle behavior.
+2. Extend journal-backed operations to future GitHub lifecycle actions and add a guided recovery inspection surface.
 3. Add native project picker, terminal, diff and test panels.
-4. Add an interactive GOD approval queue for provider escalation requests.
+4. Implement meeting scheduling and safe observable summaries on the typed meeting foundation.
 5. Remove the Node runtime only after real-provider and control-plane parity tests pass.

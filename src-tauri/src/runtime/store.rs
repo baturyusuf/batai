@@ -11,6 +11,7 @@ use serde_json::Value;
 use super::{
     errors::{Result, RuntimeError},
     migrations,
+    recovery::OperationJournal,
     types::{
         Agent, AgentStatus, IngestDisposition, ResourceState, RuntimeEvent, SchedulerJob,
         SchedulerJobStatus, Session, Task, TaskRun, TaskRunStatus, TaskStatus,
@@ -96,6 +97,114 @@ impl RuntimeStore {
             .query_map([kind], |row| json_column(row.get::<_, String>(0)?))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(values)
+    }
+
+    pub fn upsert_operation_journal(&self, journal: &OperationJournal) -> Result<()> {
+        self.db()?.execute(
+            r#"INSERT INTO operation_journal
+               (operation_id,operation_type,phase,actor,target,record_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(operation_id) DO UPDATE SET
+               phase=excluded.phase,record_json=excluded.record_json,updated_at=excluded.updated_at"#,
+            params![
+                journal.operation_id,
+                journal.operation_type,
+                journal.current_phase.label(),
+                journal.actor,
+                journal.target,
+                serde_json::to_string(journal)?,
+                journal.created_at,
+                journal.updated_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_unfinished_operation_journals(&self) -> Result<Vec<OperationJournal>> {
+        let db = self.db()?;
+        let mut statement = db.prepare(
+            "SELECT record_json FROM operation_journal WHERE phase NOT IN ('COMMITTED','ROLLED_BACK','NEEDS_REVIEW') ORDER BY created_at",
+        )?;
+        let values = statement
+            .query_map([], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn list_blocking_operation_journals(&self) -> Result<Vec<OperationJournal>> {
+        let db = self.db()?;
+        let mut statement = db.prepare(
+            "SELECT record_json FROM operation_journal WHERE phase NOT IN ('COMMITTED','ROLLED_BACK') ORDER BY created_at",
+        )?;
+        let values = statement
+            .query_map([], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn count_operation_phase(&self, phase: &str) -> Result<usize> {
+        let count: i64 = self.db()?.query_row(
+            "SELECT COUNT(*) FROM operation_journal WHERE phase=?",
+            [phase],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn count_blocking_operations(&self) -> Result<usize> {
+        let count: i64 = self.db()?.query_row(
+            "SELECT COUNT(*) FROM operation_journal WHERE phase NOT IN ('COMMITTED','ROLLED_BACK')",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count.max(0) as usize)
+    }
+
+    pub fn list_operation_journals(&self, limit: usize) -> Result<Vec<OperationJournal>> {
+        let db = self.db()?;
+        let mut statement = db.prepare(
+            "SELECT record_json FROM operation_journal ORDER BY updated_at DESC LIMIT ?",
+        )?;
+        let values = statement
+            .query_map([limit as i64], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn apply_journal_db_entities(&self, journal: &OperationJournal) -> Result<()> {
+        let mut db = self.db()?;
+        let transaction = db.transaction()?;
+        for entity in &journal.affected_db_entities {
+            if entity.entity_type == "AGENT" {
+                apply_agent_value(
+                    &transaction,
+                    &entity.entity_id,
+                    entity.intended_after.as_ref(),
+                )?;
+            }
+        }
+        transaction.execute(
+            "UPDATE operation_journal SET phase=?,record_json=?,updated_at=? WHERE operation_id=?",
+            params![
+                journal.current_phase.label(),
+                serde_json::to_string(journal)?,
+                journal.updated_at,
+                journal.operation_id
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn rollback_journal_db_entities(&self, journal: &OperationJournal) -> Result<()> {
+        let mut db = self.db()?;
+        let transaction = db.transaction()?;
+        for entity in &journal.affected_db_entities {
+            if entity.entity_type == "AGENT" {
+                apply_agent_value(&transaction, &entity.entity_id, entity.before.as_ref())?;
+            }
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn append_governance_audit(&self, row: &GovernanceAuditRow<'_>) -> Result<()> {
@@ -614,6 +723,39 @@ impl RuntimeStore {
 
 fn now() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+fn apply_agent_value(
+    transaction: &rusqlite::Transaction<'_>,
+    entity_id: &str,
+    value: Option<&Value>,
+) -> Result<()> {
+    let Some(value) = value else {
+        transaction.execute("DELETE FROM agents WHERE id=?", [entity_id])?;
+        return Ok(());
+    };
+    let agent: Agent = serde_json::from_value(value.clone())?;
+    let json = serde_json::to_string(&agent)?;
+    transaction.execute(
+        r#"INSERT INTO agents(id,name,provider,model,reasoning_effort,status,parent_agent_id,current_task_id,config_json,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,
+           provider=excluded.provider,model=excluded.model,reasoning_effort=excluded.reasoning_effort,
+           status=excluded.status,parent_agent_id=excluded.parent_agent_id,current_task_id=excluded.current_task_id,
+           config_json=excluded.config_json,updated_at=excluded.updated_at"#,
+        params![
+            agent.id,
+            agent.name,
+            agent.provider,
+            agent.model,
+            agent.reasoning_effort,
+            agent.status.to_string(),
+            agent.parent_agent_id,
+            agent.current_task_id,
+            json,
+            now()
+        ],
+    )?;
+    Ok(())
 }
 
 fn parse_column<T: FromStr>(value: String) -> rusqlite::Result<T>

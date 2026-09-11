@@ -41,15 +41,19 @@ Soft termination preserves task runs, events, reviews, decisions, audit history 
 
 Task dependencies are derived from tasks. Handoffs are runtime/organizational-memory records. Reporting, dependency and handoff edges are therefore not editable as generic relationships.
 
-Writes use same-directory temporary files, file flushes and replace/rollback behavior. SQLite schema migrations add durable governance records, append-only audit rows and explicit review outcomes. A recursive debounced watcher validates external config/policy/organization edits before accepting them into runtime state; malformed or partially written JSON is rejected and surfaced as an observable event.
+Cross-store writes use the recoverable operation journal described in [Recovery Model](RECOVERY_MODEL.md). The journal is durably `PREPARED` before organization files or SQLite entities change. Files use same-directory temporary files, flushes and replace/backup behavior; related SQLite changes run in one database transaction where possible. A recursive debounced watcher validates external config/policy/organization edits before accepting them into runtime state and ignores paths owned by an unfinished journal operation. Malformed, conflicting or partially written JSON is rejected and surfaced as an observable event.
 
 ## Decisions, approvals and audit
 
 The Decision Ledger persists GOD decisions both in SQLite and `.batai/decisions/`, so open and resolved decisions survive restart. Each entry includes requester, exact bound mutation, impact, status, timestamps and optional resolution note.
 
-Provider approvals are a separate per-request queue. Codex runs with `approvalPolicy: never` and workspace-write sandboxing. Unexpected App Server requests are captured in the provider queue with credential-like fields and suspicious bearer/key strings redacted, then conservatively denied; they are never converted into organizational decisions or blanket approvals. The UI can approve/reject queued provider requests individually, but an already auto-denied request is not retroactively executed.
+Provider approvals are a separate per-request queue. In the interactive desktop, Codex uses the official App Server request/response protocol and can pause one live operation for GOD. The record is bound to provider process/session, thread, turn, JSON-RPC request, agent, task and worktree. The only user actions are `Allow once` and `Deny`; the response is returned to that exact live request and the same turn continues. Duplicate requests share the persisted record and decision.
 
-Every mutation attempt records actor, resolved authority, action, target, outcome, reason, task/decision linkage and organization revision. Audit storage is append-only; there is no update or delete API.
+Headless execution, an unavailable UI, an out-of-worktree target or a policy denial fails closed. A configurable timeout also denies the request. Shutdown/cancellation wakes the waiter and cancels or denies it. On restart, an old pending request becomes `ORPHANED`, because Batai never assumes that a new process can answer an earlier process's request; the associated task requires review. An approved response whose delivery cannot be confirmed becomes `RESPONSE_UNCERTAIN`, not `RESPONDED`, preventing blind replay.
+
+Provider approval does not disable workspace sandboxing or Batai policy. It authorizes one observable provider operation, not an organizational mutation and not future requests. Credential-like fields and suspicious bearer/key strings are redacted before persistence. Hidden reasoning is never part of the approval record.
+
+Every mutation attempt records actor, resolved authority, action, target, outcome, reason, task/decision linkage and organization revision. Recovery writes separate human-readable `RECOVERED`, `ROLLED_BACK` or `RECOVERY_REQUIRED` audit outcomes. The journal remains a recovery mechanism rather than audit history; audit storage is append-only and has no update or delete API.
 
 ## Intelligence, memory and review
 
@@ -61,4 +65,4 @@ The UI shows observable execution events and audit history. Hidden chain-of-thou
 
 ## Current boundary
 
-The governance queue is implemented for the Rust desktop runtime. The Node control plane remains a compatibility layer and has not yet been fully redirected through Rust mutations. Meeting scheduling/execution and automatic summaries are typed foundations, not a completed meeting product. Unexpected Codex approval requests are fail-closed and visible after denial; a future provider protocol slice can suspend a live request while awaiting GOD without broadening permissions.
+The governance and live provider-approval queues are implemented for the Rust desktop runtime. The Node control plane remains a compatibility layer and has not yet been fully redirected through Rust mutations. Meeting scheduling/execution and automatic summaries are typed foundations, not a completed meeting product. A provider request cannot survive the death of its original App Server process; restart therefore orphans it and deliberately requires review rather than replay.

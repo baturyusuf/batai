@@ -18,6 +18,7 @@ use super::{
     events::EventEngine,
     execution_provider::provider_failure,
     organization::AgentLifecycle,
+    recovery::{agent_db_entity, RecoveryEngine},
     sessions::SessionManager,
     store::RuntimeStore,
     types::{
@@ -36,6 +37,7 @@ pub struct TaskEngine {
     running_tasks: Arc<Mutex<HashSet<String>>>,
     unknown_quota_retry: Duration,
     worktrees: Option<super::worktrees::WorktreeManager>,
+    recovery: Option<RecoveryEngine>,
 }
 
 impl TaskEngine {
@@ -55,11 +57,17 @@ impl TaskEngine {
             running_tasks: Default::default(),
             unknown_quota_retry,
             worktrees: None,
+            recovery: None,
         }
     }
 
     pub fn with_worktrees(mut self, manager: super::worktrees::WorktreeManager) -> Self {
         self.worktrees = Some(manager);
+        self
+    }
+
+    pub fn with_recovery(mut self, recovery: RecoveryEngine) -> Self {
+        self.recovery = Some(recovery);
         self
     }
 
@@ -320,9 +328,30 @@ impl TaskEngine {
             .is_some_and(super::organization::AgentFunction::is_coding);
         if coding_function || super::worktrees::role_requires_worktree(&agent.role_template) {
             if let Some(manager) = &self.worktrees {
+                let before = agent.clone();
                 let created = manager.ensure(&agent_id, &task.id)?;
                 agent.worktree = Some(created.path.to_string_lossy().into_owned());
-                self.agents.register(&agent)?;
+                if let Some(recovery) = &self.recovery {
+                    let mut journal = recovery.prepare(
+                        "ASSIGN_WORKTREE_METADATA",
+                        "batai",
+                        Some(agent_id.clone()),
+                        0,
+                        0,
+                        vec![],
+                        vec![agent_db_entity(Some(before), Some(agent.clone()))?],
+                        None,
+                        Some(task.id.clone()),
+                    )?;
+                    recovery.apply_files(&mut journal)?;
+                    if let Err(error) = recovery.apply_db(&mut journal) {
+                        let _ = recovery.fail_and_rollback(&mut journal, &error.to_string());
+                        return Err(error);
+                    }
+                    recovery.commit(&mut journal)?;
+                } else {
+                    self.agents.register(&agent)?;
+                }
                 self.events.publish(
                     if created.reused {
                         EventType::WorktreeReused
