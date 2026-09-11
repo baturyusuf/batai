@@ -17,6 +17,8 @@ The Rust rewrite moves Batai from a Node-hosted control-plane prototype to a Tau
 - Provider-neutral Rust domain and project-state modules.
 - Bundled SQLite operational store at `.runtime/runtime.sqlite`, with WAL, foreign keys and idempotent schema migrations compatible with the Node tables.
 - Typed agent, task, resource, scheduler-job, task-run and event states using the existing uppercase JSON contract.
+- Typed organizational identity: L0-L7 seniority, function, explicit department, reporting parent and model-independent title generation.
+- Unknown-safe model/effective capability profiles and configurable role-specific recommendation policy.
 - Persist-first event engine with a broadcast boundary for later live Tauri subscriptions.
 - `.batai/tasks/*.json` initial scan and cross-platform debounced watcher. Invalid or partially written JSON is isolated and reported without stopping the watcher.
 - Content-hash/revision based task ingestion, protected terminal/running states and cycle-safe dependency evaluation.
@@ -29,12 +31,12 @@ The Rust rewrite moves Batai from a Node-hosted control-plane prototype to a Tau
 - Session persistence with provider/model/reasoning/worktree/config fingerprints.
 - Persistent resource states and SQLite-backed, deduplicated resource-recheck jobs with restart reconciliation.
 - Director review gate and deterministic downstream task activation.
-- Runtime-backed desktop snapshots for agent/task status and weighted progress.
+- Runtime-backed organization snapshot for agent/task status, relationships, observable activity, performance, usage/resources and weighted progress.
 - Weighted project progress calculation.
 - Compatible GOD-to-Director message creation.
 - Provider-specific execution and diagnostic modules under `src-tauri/src/providers`.
 - Account connection guides for official authentication paths.
-- New three-column desktop UI with Overview, Workspace, Organization Map, Task Board, Accounts and Agent Inspector surfaces.
+- New three-column desktop UI with a real SVG Organization graph, Hierarchy/Workflow/Combined modes, Resource Dashboard and tabbed Agent Inspector.
 - Push-based `batai://runtime-event` updates from Rust to the Tauri UI.
 
 ## Build
@@ -52,7 +54,7 @@ Requirements:
 
 The legacy Node runtime remains in the branch during protocol migration. It provides compatibility and regression tests until the Rust task, event, session and resource engines reach feature parity.
 
-The Rust suite currently contains 53 tests. GitHub Actions validates the Node compatibility suite on Linux and formatting, linting, tests and the desktop build on Windows. Real-provider smoke tests remain explicitly opt-in.
+The Rust suite currently contains 63 tests. GitHub Actions validates the Node compatibility suite on Linux and formatting, linting, tests and the desktop build on Windows. Real-provider smoke and mutation-level acceptance tests remain explicitly opt-in.
 
 ## Remaining migration slices
 

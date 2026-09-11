@@ -24,7 +24,7 @@
 - Web control plane
 - HTTP control-plane validation for malformed JSON and invalid payloads
 
-Automated test suite: **23 passing tests** at the time of this snapshot.
+Automated test suite: **28 passing Node tests** at the time of this snapshot.
 
 ## Implemented and smoke-tested at protocol/process level
 
@@ -63,8 +63,11 @@ Automated test suite: **23 passing tests** at the time of this snapshot.
 - Provider-neutral execution/session abstraction with fingerprint-safe session recovery.
 - Persistent quota state, durable deduplicated resume jobs and restart reconciliation.
 - Runtime-backed agent/task/progress snapshots.
-- Organization-first Overview and Organization Map.
-- Workspace, Task Board, Accounts and Agent Inspector surfaces.
+- Typed L0-L7 seniority, role/function catalog, explicit departments, reporting parents and backward-compatible legacy role parsing.
+- Separate model/effective capability profiles and configurable function-specific seniority recommendations.
+- Organization snapshot aggregation for reporting/workflow relationships, observable activity, task-run performance, per-agent/project usage and provider resources.
+- Real SVG node-edge Organization Map with Hierarchy, Workflow and Combined modes, semantic edges, cycle/orphan safety, pan/zoom/fit/reset, search and explicit-field filters.
+- Workspace, Task Board, Accounts, Resource Dashboard and tabbed Agent Inspector surfaces.
 - Official connection guidance for Codex, Claude Code, GitHub and Ollama.
 - Real Codex App Server transport with initialize, thread start/resume, turn streaming, interruption, safe approval denial and subscription usage telemetry.
 - Supervised Claude Code JSON execution with named/resumable sessions, cancellation and normalized token/cost reporting.
@@ -73,15 +76,16 @@ Automated test suite: **23 passing tests** at the time of this snapshot.
 - Automatic task-scoped Git worktrees for coding roles, safe reuse/removal, dirty-state inspection and durable execution checkpoints.
 - Conservative crash reconciliation: interrupted mutations become `UNKNOWN_AFTER_CRASH` and require review instead of automatic duplicate execution.
 - Push-based Tauri runtime events with debounced snapshot refresh in the desktop UI.
-- Fifty-three passing Rust tests, including an explicit opt-in authenticated Codex App Server smoke test.
+- Sixty-three passing Rust tests, including an explicit opt-in authenticated Codex App Server smoke and a separate real inference/worktree acceptance test.
+- Manual UI smoke at 1440x900 and 1100x720 with no JavaScript console errors.
 
 The Node HTTP control plane remains as a compatibility layer until the Rust task, event, session and resource engines reach feature parity.
 
 ## Next engineering milestones
 
-1. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.
-2. Add Agent-to-Agent meeting/message primitives on top of structured events.
-3. Run real GitHub issue → task → PR workflow with authenticated `gh`.
+1. Add persistent collaboration/review relationship editing and derive temporary meeting groups from events.
+2. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
+3. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.
 4. Port remaining authority and organizational-memory control-plane behavior, then remove the compatibility runtime after parity.
 5. Add native editor/LSP/terminal integration beyond the workspace scaffold.
 6. Add an interactive approval surface so selected provider requests can be reviewed by GOD instead of conservatively cancelled.
