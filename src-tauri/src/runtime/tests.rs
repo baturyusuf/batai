@@ -89,6 +89,10 @@ fn agent(id: &str) -> Agent {
         title_override: None,
         model_capabilities: Default::default(),
         effective_capabilities: Default::default(),
+        lifecycle: Default::default(),
+        authority: Default::default(),
+        permissions: vec![],
+        intelligence_policy: Default::default(),
         parent_agent_id: Some("director".into()),
         provider: "mock".into(),
         model: "mock-medium".into(),
@@ -173,6 +177,29 @@ fn agent_persistence_round_trips_typed_state() {
     let h = harness(RuntimeStore::open_memory().expect("store"));
     register(&h, &["a"]);
     assert_eq!(h.agents.get("a").expect("read").expect("agent"), agent("a"));
+}
+
+#[test]
+fn registry_preserves_runtime_worktree_updates_and_external_refresh_state() {
+    let h = harness(RuntimeStore::open_memory().expect("store"));
+    register(&h, &["a"]);
+    let mut runtime_update = h.agents.get("a").unwrap().unwrap();
+    runtime_update.worktree = Some("C:/tmp/managed-worktree".into());
+    h.agents.register(&runtime_update).unwrap();
+    assert_eq!(
+        h.agents.get("a").unwrap().unwrap().worktree.as_deref(),
+        Some("C:/tmp/managed-worktree")
+    );
+    h.agents
+        .transition("a", AgentStatus::Running, Some("task"))
+        .unwrap();
+    let mut declarative_refresh = agent("a");
+    declarative_refresh.name = "Updated Name".into();
+    h.agents.register(&declarative_refresh).unwrap();
+    let current = h.agents.get("a").unwrap().unwrap();
+    assert_eq!(current.status, AgentStatus::Running);
+    assert_eq!(current.current_task_id.as_deref(), Some("task"));
+    assert_eq!(current.name, "Updated Name");
 }
 
 #[test]
@@ -338,6 +365,32 @@ fn invalid_agent_transition_is_rejected() {
         .transition("a", AgentStatus::Completed, None)
         .expect_err("invalid transition");
     assert!(matches!(error, RuntimeError::InvalidAgentTransition { .. }));
+}
+
+#[tokio::test]
+async fn task_scoped_agent_terminates_after_its_last_task() {
+    use super::organization::{AgentFunction, AgentLifecycle, Department, Seniority};
+
+    let h = harness(RuntimeStore::open_memory().expect("store"));
+    let mut temporary = agent("temporary");
+    temporary.schema_version = 2;
+    temporary.seniority = Some(Seniority::Senior);
+    temporary.function = Some(AgentFunction::SoftwareEngineer);
+    temporary.department = Some(Department::Engineering);
+    temporary.lifecycle = AgentLifecycle::TaskScoped;
+    h.agents.register(&temporary).expect("temporary agent");
+    h.engine
+        .ingest(task("one-shot", &["temporary"], &[]), None)
+        .await
+        .expect("task");
+    assert_eq!(
+        h.agents
+            .get("temporary")
+            .expect("read")
+            .expect("agent")
+            .status,
+        AgentStatus::Terminated
+    );
 }
 
 #[tokio::test]

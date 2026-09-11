@@ -198,10 +198,10 @@ impl AgentFunction {
         let level = seniority.level();
         match self {
             Self::Director => seniority == Seniority::Director,
-            Self::EngineeringManager => (4..=7).contains(&level),
+            Self::EngineeringManager => (4..=6).contains(&level),
             Self::ProductManager
             | Self::TechnicalProductManager
-            | Self::TechnicalProgramManager => (2..=7).contains(&level),
+            | Self::TechnicalProgramManager => (2..=6).contains(&level),
             Self::ProjectCoordinator | Self::BusinessAnalyst | Self::ProductAnalyst => {
                 (1..=6).contains(&level)
             }
@@ -295,6 +295,69 @@ pub enum RelationshipType {
     Dependency,
     Handoff,
     Review,
+    Advisory,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AuthorityRole {
+    God,
+    Director,
+    Lead,
+    #[default]
+    Worker,
+}
+
+impl AuthorityRole {
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Worker => 1,
+            Self::Lead => 2,
+            Self::Director => 3,
+            Self::God => 4,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AgentLifecycle {
+    #[default]
+    TaskScoped,
+    Project,
+    Permanent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AgentPermission {
+    ReadWorkspace,
+    WriteWorkspace,
+    RunCommands,
+    ManageTasks,
+    ReviewWork,
+    ManageAgents,
+    ManageOrganization,
+    ManageProviders,
+    ApprovePayg,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ModelAssignment {
+    #[default]
+    Auto,
+    Explicit,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct IntelligencePolicy {
+    pub assignment: ModelAssignment,
+    pub preferred_providers: Vec<String>,
+    pub allowed_models: Vec<String>,
+    pub allow_payg: bool,
+    pub minimum_capability: Option<CapabilityScore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

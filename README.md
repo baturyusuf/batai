@@ -10,6 +10,8 @@ The core idea is that the **Director AI operates the organization through Batai 
 
 - Director-controlled Agent Registry with lifecycle validation
 - Agent Factory policy checks: active-agent limits, hierarchy depth, GOD approval for permanent agents
+- Rust organization governance with typed mutations, authority/permission routing, optimistic revisions and append-only audit
+- Task-scoped, project and permanent agent lifecycles with soft termination and history preservation
 - Provider/model/reasoning configuration per agent
 - Typed L0-L7 organizational seniority, function, department and reporting identity independent of model assignment
 - Separate model/effective capability profiles with unknown-safe scores and function-specific assignment recommendations
@@ -23,6 +25,7 @@ The core idea is that the **Director AI operates the organization through Batai 
 - Agent `ROLE.md` / `DIRECTIVES.md` files and directive-change events
 - GOD inbox with authority `100`
 - Decision Ledger with GOD-locked decisions
+- Persistent non-reporting relationships and explicit review outcomes
 - Resource states and `WAITING_RESOURCE` / automatic resume scheduling
 - Persistent provider session metadata
 - Git worktree manager
@@ -33,6 +36,7 @@ The core idea is that the **Director AI operates the organization through Batai 
 - GitHub CLI issue/PR adapter when `gh` is available
 - MCP-compatible Director control server
 - Live node-edge Organization Map with Hierarchy, Workflow and Combined modes, semantic edges, search, filters, pan/zoom and Agent Inspector
+- Organization Edit mode, Agent Factory form, decision/provider approval queues and project policy settings
 - Resource Dashboard with provider health, usage source, quota, token and provider-reported cost summaries
 - Tauri 2 desktop application backed by the Rust runtime
 - Rust bundled-SQLite migrations, typed runtime state and persist-first events
@@ -165,8 +169,8 @@ tests/          orchestration/provider tests
 
 - Claude Code and Ollama require their local executables/services and have not been authenticated on every CI host; their deterministic contracts are tested without credentials.
 - Crash recovery preserves provider/session/worktree evidence and requires review after an uncertain mutation; it does not reattach to an independently surviving OS process.
-- Headless provider approval requests are conservatively cancelled. An interactive GOD approval queue is still planned.
-- Authority, decision ledger, organizational memory and GitHub lifecycle parity still partly comes from the Node compatibility layer.
+- Unexpected Codex provider approval requests are captured and conservatively cancelled. The queue supports per-request review, but live request suspension while waiting for GOD is still planned.
+- GitHub lifecycle parity and some organizational-memory workflows still come from the Node compatibility layer.
 - Runtime events expose observable execution trace, not hidden model reasoning. Fine-grained activities such as reading versus testing remain generic when a provider does not report them.
 
-See [Organization Model](docs/ORGANIZATION_MODEL.md), `docs/IMPLEMENTATION_STATUS.md` and `specs/` for the remaining roadmap.
+See [Organization Model](docs/ORGANIZATION_MODEL.md), [Organization Governance](docs/GOVERNANCE.md), `docs/IMPLEMENTATION_STATUS.md` and `specs/` for the remaining roadmap.

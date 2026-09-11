@@ -1,4 +1,8 @@
 import {buildGraph, preservedSelection, searchableText, statusGroup} from './organization-graph.js';
+import {
+  FUNCTIONS, SENIORITIES, conflictMessage, createMutationRequest, openCount,
+  relationshipIsEditable, validFunctionsForSeniority
+} from './governance-ui.js';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -10,10 +14,12 @@ const number = value => value === null || value === undefined ? '—' : Number(v
 const percent = value => value === null || value === undefined ? '—' : `${Math.round(value * 10) / 10}%`;
 const departmentLabel = value => value === 'DATA_AI' || value === 'DataAi' ? 'Data & AI' : label(value);
 
-let snapshot = {god:{id:'god',label:'User'},project:{name:'Batai',progress:0,usage:{}},agents:[],tasks:[],relationships:[],resources:[],activity:[],hierarchyWarnings:[]};
+let snapshot = {god:{id:'god',label:'User'},project:{name:'Batai',progress:0,usage:{}},agents:[],tasks:[],relationships:[],resources:[],activity:[],hierarchyWarnings:[],governance:{revision:0,policy:{limits:{maxActiveAgents:8,maxHierarchyDepth:3}},decisions:[],providerApprovals:[],audit:[]}};
 let providers = [];
 let refreshTimer;
 let inspectorTab = 'overview';
+let organizationEditMode = false;
+let confirmOperation = null;
 const graphState = {
   mode:'hierarchy', scale:1, tx:0, ty:20, selectedId:null, query:'', fitted:false,
   filters:{departments:[],seniorities:[],statuses:[],providers:[]}
@@ -38,6 +44,8 @@ async function loadSnapshot() {
     authMode:agent.auth_mode, status:agent.status, activity:agent.activity ?? 'IDLE',
     currentTaskId:agent.current_task_id, currentTaskObjective:agent.current_task_objective,
     worktree:agent.worktree, performance:agent.performance ?? {}, usage:agent.usage ?? {}
+    ,lifecycle:agent.lifecycle ?? 'TASK_SCOPED', authority:agent.authority ?? 'WORKER',
+    permissions:agent.permissions ?? [], intelligencePolicy:agent.intelligence_policy ?? {}, history:agent.history ?? []
   }));
   const total = tasks.reduce((sum, task) => sum + task.weight, 0);
   const progress = total ? Math.round(tasks.reduce((sum, task) => sum + task.weight * task.progress, 0) / total * 1000) / 10 : 0;
@@ -127,6 +135,67 @@ function renderResources() {
   }).join('') || '<p class="empty">No runtime resource state has been reported.</p>';
 }
 
+function renderGovernance() {
+  const governance = snapshot.governance ?? {};
+  const decisions = governance.decisions ?? [];
+  const approvals = governance.providerApprovals ?? [];
+  const open = openCount(decisions);
+  $('#organization-revision').textContent = `rev ${governance.revision ?? 0}`;
+  $('#decision-count').textContent = `${open} open`;
+  $('#decision-count').classList.toggle('has-open', open > 0);
+  const navDecision = $('.nav-item[data-view="decisions"]');
+  navDecision?.classList.toggle('attention', open + openCount(approvals) > 0);
+  $('#decision-list').innerHTML = decisions.map(decision => `<article class="governance-record"><header><strong>${esc(decision.question)}</strong><span class="record-status ${esc(decision.status.toLowerCase())}">${esc(label(decision.status))}</span></header><p>${esc(decision.impact)}</p><small>${esc(decision.requestedBy)} · ${esc(new Date(decision.createdAt).toLocaleString())}</small>${decision.status === 'OPEN' ? `<div class="record-actions"><button class="approve" data-decision="${esc(decision.id)}" data-resolution="approve">Approve exact change</button><button class="reject" data-decision="${esc(decision.id)}" data-resolution="reject">Reject</button></div>` : ''}</article>`).join('') || '<p class="empty">No organizational decisions.</p>';
+  $('#approval-list').innerHTML = approvals.map(approval => `<article class="governance-record"><header><strong>${esc(label(approval.operation))}</strong><span class="record-status ${esc(approval.status.toLowerCase())}">${esc(label(approval.status))}</span></header><p>${esc(label(approval.provider))} · ${esc(approval.agentId ?? 'Unknown agent')} · ${esc(approval.taskId ?? 'No task')}</p><small>${esc(new Date(approval.createdAt).toLocaleString())}</small>${approval.status === 'PENDING' ? `<div class="record-actions"><button class="approve" data-approval="${esc(approval.id)}" data-resolution="approve">Approve this request</button><button class="reject" data-approval="${esc(approval.id)}" data-resolution="reject">Deny</button></div>` : ''}</article>`).join('') || '<p class="empty">No provider approval requests.</p>';
+  $$('[data-decision]').forEach(button => button.addEventListener('click', () => resolveDecision(button.dataset.decision, button.dataset.resolution === 'approve')));
+  $$('[data-approval]').forEach(button => button.addEventListener('click', () => resolveApproval(button.dataset.approval, button.dataset.resolution === 'approve')));
+  renderPolicy();
+}
+
+function renderPolicy() {
+  const policy = snapshot.governance?.policy ?? {};
+  const form = $('#policy-form');
+  form.elements.maxActiveAgents.value = policy.limits?.maxActiveAgents ?? 8;
+  form.elements.maxHierarchyDepth.value = policy.limits?.maxHierarchyDepth ?? 3;
+  form.elements.allowPayg.checked = Boolean(policy.allowPayg);
+  form.elements.autoAgentCreation.checked = Boolean(policy.autoAgentCreation);
+  form.elements.allowedProviders.value = (policy.allowedProviders ?? []).join(', ');
+  form.elements.deniedProviders.value = (policy.deniedProviders ?? []).join(', ');
+}
+
+async function refreshSnapshot() {
+  snapshot = await loadSnapshot();
+  renderOverview(); renderTasks(); renderResources(); renderFilters(); renderGovernance(); renderGraph(true);
+  if (graphState.selectedId) {
+    const agent = snapshot.agents.find(item => item.id === graphState.selectedId);
+    if (agent) renderInspector(agent);
+  }
+}
+
+async function sendMutation(mutation, reason = null) {
+  if (!invoke) throw new Error('Organization editing requires the desktop runtime');
+  try {
+    const result = await invoke('mutate_organization', {request:createMutationRequest(snapshot.governance?.revision ?? 0, mutation, reason)});
+    await refreshSnapshot();
+    return result;
+  } catch (error) {
+    await refreshSnapshot().catch(() => {});
+    throw new Error(conflictMessage(error));
+  }
+}
+
+async function resolveDecision(decisionId, approve) {
+  if (!invoke) return;
+  await invoke('resolve_god_decision', {decisionId, approve, note:null});
+  await refreshSnapshot();
+}
+
+async function resolveApproval(approvalId, approve) {
+  if (!invoke) return;
+  await invoke('resolve_provider_approval', {approvalId, approve});
+  await refreshSnapshot();
+}
+
 function renderFilters() {
   const specs = [
     ['department-filters','departments',['Product','Engineering','Architecture','Data & AI','Quality','Operations','Security','Research']],
@@ -176,6 +245,8 @@ function renderGraph(preserveViewport = true) {
     path.setAttribute('d', `M${x1},${y1} C${x1},${middle} ${x2},${middle} ${x2},${y2}`);
     path.setAttribute('class', `graph-edge edge-${edge.type.toLowerCase()}`);
     path.setAttribute('marker-end', edge.type === 'REPORTING' ? 'url(#arrow-reporting)' : 'url(#arrow-workflow)');
+    path.dataset.edgeId = edge.id;
+    path.addEventListener('click', event => { event.stopPropagation(); renderRelationshipInspector(edge); });
     edgesElement.append(path);
     const text = document.createElementNS(svgNs, 'text');
     text.setAttribute('x', String((x1 + x2) / 2 + 6));
@@ -267,7 +338,7 @@ function renderInspector(agent) {
     return;
   }
   if (inspectorTab === 'activity') {
-    const events = snapshot.activity.filter(event => event.source === agent.id || event.target === agent.id);
+    const events = agent.history?.length ? agent.history : snapshot.activity.filter(event => event.source === agent.id || event.target === agent.id);
     $('#inspector-content').innerHTML = `<div class="activity-trace">${events.map(event => `<article><i></i><time>${esc(new Date(event.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}))}</time><div><strong>${esc(label(event.eventType))}</strong><span>${esc(event.summary)}</span></div></article>`).join('') || '<p class="metric-note">No runtime events yet.</p>'}</div>`;
     return;
   }
@@ -282,10 +353,12 @@ function renderInspector(agent) {
     return;
   }
   if (inspectorTab === 'context') {
-    $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Permissions / Context</h3><dl>${inspectorMetric('Worktree',agent.worktree)}${inspectorMetric('Session',agent.sessionState)}${inspectorMetric('Auth source',label(agent.authMode))}${inspectorMetric('Organizational parent',agent.reportsTo)}${inspectorMetric('Direct reports',agent.directReports?.join(', ') || '—')}</dl></section><p class="metric-note">Execution trace includes observable runtime events only. Hidden model reasoning is never stored or shown.</p>`;
+    $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Permissions / Context</h3><dl>${inspectorMetric('Lifecycle',label(agent.lifecycle))}${inspectorMetric('Authority',label(agent.authority))}${inspectorMetric('Permissions',(agent.permissions ?? []).map(label).join(', ') || 'Least privilege')}${inspectorMetric('Worktree',agent.worktree)}${inspectorMetric('Session',agent.sessionState)}${inspectorMetric('Auth source',label(agent.authMode))}${inspectorMetric('Organizational parent',agent.reportsTo)}${inspectorMetric('Direct reports',agent.directReports?.join(', ') || '—')}</dl></section><section class="inspector-section"><h3>Intelligence policy</h3><dl>${inspectorMetric('Assignment',label(agent.intelligencePolicy?.assignment ?? 'AUTO'))}${inspectorMetric('Preferred providers',(agent.intelligencePolicy?.preferredProviders ?? []).join(', ') || 'Auto')}${inspectorMetric('PAYG',agent.intelligencePolicy?.allowPayg ? 'Allowed' : 'Not allowed')}</dl></section><p class="metric-note">Execution trace includes observable runtime events only. Hidden model reasoning is never stored or shown.</p>`;
     return;
   }
-  $('#inspector-content').innerHTML = `<div class="agent-inspector-hero"><div class="avatar ${agent.function === 'DIRECTOR' ? 'director' : ''}">${esc(initials(agent))}</div><div><strong>${esc(agent.name)}</strong><span>${esc(agent.title)}</span><small>${esc(activityIcon(agent.activity))} ${esc(label(agent.activity))}</small></div></div><section class="inspector-section"><h3>Organizational identity</h3><dl>${inspectorMetric('Seniority',agent.seniority ? `${label(agent.seniority)} · L${agent.level}` : 'Unspecified')}${inspectorMetric('Function',label(agent.function))}${inspectorMetric('Department',agent.department)}${inspectorMetric('Reports to',agent.reportsTo)}${inspectorMetric('Direct reports',agent.directReports?.join(', ') || '—')}</dl></section><section class="inspector-section"><h3>Assigned intelligence</h3><dl>${inspectorMetric('Model',agent.model)}${inspectorMetric('Provider',label(agent.provider))}${inspectorMetric('Reasoning effort',label(agent.reasoningEffort))}${inspectorMetric('Auth / usage',label(agent.authMode))}</dl></section><section class="inspector-section"><h3>Current runtime</h3><dl>${inspectorMetric('Status',label(agent.status))}${inspectorMetric('Activity',label(agent.activity))}${inspectorMetric('Task',agent.currentTaskId)}${inspectorMetric('Worktree',agent.worktree)}${inspectorMetric('Session',agent.sessionState)}</dl></section>`;
+  const actions = organizationEditMode ? `<div class="agent-actions"><button data-agent-edit="identity">Edit identity</button><button data-agent-edit="reporting">Change manager</button><button data-agent-edit="${agent.status === 'PAUSED' ? 'resume' : 'pause'}">${agent.status === 'PAUSED' ? 'Resume' : 'Pause'}</button>${agent.authority !== 'DIRECTOR' && agent.function !== 'DIRECTOR' ? '<button class="danger" data-agent-edit="terminate">Terminate</button>' : ''}</div>` : '';
+  $('#inspector-content').innerHTML = `<div class="agent-inspector-hero"><div class="avatar ${agent.function === 'DIRECTOR' ? 'director' : ''}">${esc(initials(agent))}</div><div><strong>${esc(agent.name)}</strong><span>${esc(agent.title)}</span><small>${esc(activityIcon(agent.activity))} ${esc(label(agent.activity))}</small><i class="authority-chip">${esc(label(agent.authority))} · ${esc(label(agent.lifecycle))}</i></div></div>${actions}<section class="inspector-section"><h3>Organizational identity</h3><dl>${inspectorMetric('Seniority',agent.seniority ? `${label(agent.seniority)} · L${agent.level}` : 'Unspecified')}${inspectorMetric('Function',label(agent.function))}${inspectorMetric('Department',agent.department)}${inspectorMetric('Reports to',agent.reportsTo)}${inspectorMetric('Direct reports',agent.directReports?.join(', ') || '—')}</dl></section><section class="inspector-section"><h3>Assigned intelligence</h3><dl>${inspectorMetric('Model',agent.model)}${inspectorMetric('Provider',label(agent.provider))}${inspectorMetric('Reasoning effort',label(agent.reasoningEffort))}${inspectorMetric('Auth / usage',label(agent.authMode))}</dl></section><section class="inspector-section"><h3>Current runtime</h3><dl>${inspectorMetric('Status',label(agent.status))}${inspectorMetric('Activity',label(agent.activity))}${inspectorMetric('Task',agent.currentTaskId)}${inspectorMetric('Worktree',agent.worktree)}${inspectorMetric('Session',agent.sessionState)}</dl></section>`;
+  $$('[data-agent-edit]').forEach(button => button.addEventListener('click', () => beginAgentAction(agent, button.dataset.agentEdit)));
 }
 
 function renderTaskInspector(task) {
@@ -293,6 +366,14 @@ function renderTaskInspector(task) {
   $('#inspector-tabs').hidden = true;
   $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Task</h3><p class="task-objective">${esc(task.objective)}</p><dl>${inspectorMetric('Status',label(task.status))}${inspectorMetric('Owner',(task.assignedTo ?? []).join(', ') || 'Unassigned')}${inspectorMetric('Dependencies',(task.dependencies ?? []).join(', ') || '—')}${inspectorMetric('Weight',task.weight)}</dl></section><button class="primary-button" id="open-task-board">Open Task Board</button>`;
   $('#open-task-board').addEventListener('click', () => switchView('tasks'));
+}
+
+function renderRelationshipInspector(relationship) {
+  $('#inspector-heading').textContent = label(relationship.type);
+  $('#inspector-tabs').hidden = true;
+  const editable = organizationEditMode && relationshipIsEditable(relationship);
+  $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Relationship</h3><dl>${inspectorMetric('Type',label(relationship.type))}${inspectorMetric('From',relationship.source)}${inspectorMetric('To',relationship.target)}${inspectorMetric('Label',relationship.label)}${inspectorMetric('Source',relationship.persistent ? 'Organization configuration' : 'Runtime derived')}</dl></section>${editable ? '<button id="remove-relationship" class="quiet-button">Remove relationship</button>' : '<p class="metric-note">Reporting comes from the agent manager field. Workflow edges are derived and cannot be edited here.</p>'}`;
+  if (editable) $('#remove-relationship').addEventListener('click', () => openConfirm('Remove relationship', '<p>This persistent organization link will be removed. Runtime-derived links are unaffected.</p>', () => ({type:'REMOVE_RELATIONSHIP',data:{relationshipId:relationship.id}})));
 }
 
 function bindAgentCards() {
@@ -322,6 +403,60 @@ async function showGuide(providerId) {
   $('#connection-dialog').showModal();
 }
 
+function openConfirm(title, descriptionHtml, operation) {
+  $('#confirm-title').textContent = title;
+  $('#confirm-description').innerHTML = descriptionHtml;
+  $('#confirm-reason').value = '';
+  confirmOperation = operation;
+  $('#confirm-dialog').showModal();
+}
+
+function beginAgentAction(agent, action) {
+  if (action === 'identity') {
+    openConfirm('Edit agent identity', `<label>Name<input id="edit-agent-name" maxlength="64" value="${esc(agent.name)}"></label><label>Display title override<input id="edit-agent-title" maxlength="80" value=""></label>`, () => ({type:'UPDATE_IDENTITY',data:{agentId:agent.id,name:$('#edit-agent-name').value,titleOverride:$('#edit-agent-title').value || null}}));
+    return;
+  }
+  if (action === 'reporting') {
+    const options = ['god', ...snapshot.agents.filter(item => item.id !== agent.id && item.status !== 'TERMINATED').map(item => item.id)];
+    openConfirm('Change reporting line', `<p>${esc(agent.name)} will report to:</p><select id="edit-agent-parent">${options.map(id => `<option value="${esc(id)}" ${agent.reportsTo === id ? 'selected' : ''}>${esc(id === 'god' ? 'GOD / User' : snapshot.agents.find(item => item.id === id)?.name ?? id)}</option>`).join('')}</select>`, () => ({type:'CHANGE_REPORTING_LINE',data:{agentId:agent.id,reportsTo:$('#edit-agent-parent').value}}));
+    return;
+  }
+  if (action === 'terminate') {
+    openConfirm('Terminate agent', `<p>This is a soft termination. ${esc(agent.name)} remains in history and audit records.</p>`, reason => ({type:'TERMINATE_AGENT',data:{agentId:agent.id,reason:reason || 'Terminated by GOD'}}));
+    return;
+  }
+  const resume = action === 'resume';
+  openConfirm(`${resume ? 'Resume' : 'Pause'} agent`, `<p>${esc(agent.name)} will be ${resume ? 'returned to ready state' : 'paused after current safe boundary'}.</p>`, () => ({type:resume ? 'RESUME_AGENT' : 'PAUSE_AGENT',data:{agentId:agent.id}}));
+}
+
+function populateAgentForm() {
+  const form = $('#agent-form');
+  form.reset();
+  form.elements.seniority.innerHTML = SENIORITIES.map(([name, level]) => `<option value="${name}" ${name === 'SENIOR' ? 'selected' : ''}>L${level} · ${label(name)}</option>`).join('');
+  updateFunctionOptions();
+  form.elements.reportsTo.innerHTML = `<option value="">No manager</option><option value="god">GOD / User</option>${snapshot.agents.filter(agent => agent.status !== 'TERMINATED').map(agent => `<option value="${esc(agent.id)}">${esc(agent.name)} · ${esc(agent.title)}</option>`).join('')}`;
+  const director = snapshot.agents.find(agent => agent.function === 'DIRECTOR' || agent.id.toLowerCase() === 'director');
+  if (director) form.elements.reportsTo.value = director.id;
+  $('#agent-form-error').textContent = '';
+}
+
+function updateFunctionOptions() {
+  const form = $('#agent-form');
+  const previous = form.elements.function.value;
+  const options = validFunctionsForSeniority(form.elements.seniority.value);
+  form.elements.function.innerHTML = options.map(([id, value]) => `<option value="${id}">${esc(value.title)}</option>`).join('');
+  if (options.some(([id]) => id === previous)) form.elements.function.value = previous;
+  else if (options.some(([id]) => id === 'BACKEND_ENGINEERING')) form.elements.function.value = 'BACKEND_ENGINEERING';
+}
+
+function populateRelationshipForm() {
+  const options = snapshot.agents.filter(agent => agent.status !== 'TERMINATED').map(agent => `<option value="${esc(agent.id)}">${esc(agent.name)} · ${esc(agent.title)}</option>`).join('');
+  $('#relationship-form').elements.source.innerHTML = options;
+  $('#relationship-form').elements.target.innerHTML = options;
+  if (snapshot.agents.length > 1) $('#relationship-form').elements.target.selectedIndex = 1;
+  $('#relationship-form-error').textContent = '';
+}
+
 function switchView(view) {
   $$('.view').forEach(section => section.classList.toggle('active', section.id === `view-${view}`));
   $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
@@ -334,6 +469,7 @@ function switchView(view) {
     requestAnimationFrame(() => { renderGraph(true); if (!graphState.fitted) fitGraph(); });
   }
   if (view === 'resources') renderResources();
+  if (view === 'decisions' || view === 'settings') renderGovernance();
 }
 
 async function sendMessage(content) {
@@ -405,7 +541,7 @@ function initializeGraphControls() {
 async function boot() {
   try {
     [snapshot, providers] = await Promise.all([loadSnapshot(), loadProviders()]);
-    renderOverview(); renderTasks(); renderProviders(); renderResources(); renderFilters(); renderGraph(true);
+    renderOverview(); renderTasks(); renderProviders(); renderResources(); renderFilters(); renderGovernance(); renderGraph(true);
     graphState.fitted = false;
     $('#blocker-count').textContent = snapshot.project.blockedTasks ?? 0;
     const listen = window.__TAURI__?.event?.listen;
@@ -414,7 +550,7 @@ async function boot() {
       refreshTimer = setTimeout(async () => {
         try {
           snapshot = await loadSnapshot();
-          renderOverview(); renderTasks(); renderResources(); renderFilters(); renderGraph(true);
+          renderOverview(); renderTasks(); renderResources(); renderFilters(); renderGovernance(); renderGraph(true);
           if (graphState.selectedId) {
             const agent = snapshot.agents.find(item => item.id === graphState.selectedId);
             if (agent) renderInspector(agent);
@@ -435,6 +571,78 @@ $('#open-accounts').addEventListener('click', () => switchView('accounts'));
 $('#refresh-providers').addEventListener('click', async () => { providers = await loadProviders(); renderProviders(); renderOverview(); renderResources(); });
 $('#copy-command').addEventListener('click', () => navigator.clipboard.writeText($('#copy-command').dataset.command || ''));
 $('#inspector-back').addEventListener('click', renderProjectInspector);
+$('#toggle-org-edit').addEventListener('click', event => {
+  organizationEditMode = !organizationEditMode;
+  event.currentTarget.textContent = organizationEditMode ? 'Done editing' : 'Edit organization';
+  $('#create-agent').hidden = !organizationEditMode;
+  $('#add-relationship').hidden = !organizationEditMode;
+  const agent = snapshot.agents.find(item => item.id === graphState.selectedId);
+  if (agent) renderInspector(agent);
+});
+$('#create-agent').addEventListener('click', () => { populateAgentForm(); $('#agent-dialog').showModal(); });
+$('#add-relationship').addEventListener('click', () => { populateRelationshipForm(); $('#relationship-dialog').showModal(); });
+$$('[data-close-dialog]').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
+$('#agent-form').elements.seniority.addEventListener('change', updateFunctionOptions);
+$('#agent-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const functionId = form.elements.function.value;
+  const functionPolicy = FUNCTIONS[functionId];
+  try {
+    await sendMutation({type:'CREATE_AGENT',data:{
+      id:null,name:form.elements.name.value || null,seniority:form.elements.seniority.value,
+      function:functionId,department:functionPolicy.department,reportsTo:form.elements.reportsTo.value || null,
+      lifecycle:form.elements.lifecycle.value,authority:'WORKER',provider:form.elements.provider.value,model:form.elements.model.value,
+      reasoningEffort:'medium',permissions:['READ_WORKSPACE','WRITE_WORKSPACE','RUN_COMMANDS'],
+      intelligencePolicy:{assignment:'AUTO',preferredProviders:[],allowedModels:[],allowPayg:false,minimumCapability:null}
+    }}, 'Created from Organization Editor');
+    $('#agent-dialog').close();
+  } catch (error) { $('#agent-form-error').textContent = error.message; }
+});
+$('#relationship-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  if (form.elements.source.value === form.elements.target.value) {
+    $('#relationship-form-error').textContent = 'Choose two different agents.';
+    return;
+  }
+  const type = form.elements.type.value;
+  try {
+    await sendMutation({type:'ADD_RELATIONSHIP',data:{relationship:{
+      id:`${type.toLowerCase()}:${form.elements.source.value}:${form.elements.target.value}`,
+      type,source:form.elements.source.value,target:form.elements.target.value,persistent:true,
+      taskId:null,label:form.elements.label.value || label(type)
+    }}}, 'Added from Organization Editor');
+    $('#relationship-dialog').close();
+  } catch (error) { $('#relationship-form-error').textContent = error.message; }
+});
+$('#confirm-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!confirmOperation) return;
+  const reason = $('#confirm-reason').value.trim() || null;
+  try {
+    await sendMutation(confirmOperation(reason), reason);
+    $('#confirm-dialog').close();
+    confirmOperation = null;
+  } catch (error) { $('#confirm-description').insertAdjacentHTML('beforeend', `<p class="form-error">${esc(error.message)}</p>`); }
+});
+$('#policy-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const current = snapshot.governance?.policy ?? {};
+  const split = value => value.split(',').map(item => item.trim().toLowerCase()).filter(Boolean);
+  const policy = {...current,
+    schemaVersion:1,revision:snapshot.governance?.revision ?? 0,
+    limits:{maxActiveAgents:Number(form.elements.maxActiveAgents.value),maxHierarchyDepth:Number(form.elements.maxHierarchyDepth.value)},
+    allowPayg:form.elements.allowPayg.checked,autoAgentCreation:form.elements.autoAgentCreation.checked,
+    permanentAgentsRequireGod:true,allowedProviders:split(form.elements.allowedProviders.value),deniedProviders:split(form.elements.deniedProviders.value),
+    productionDeployRequiresGod:true
+  };
+  try {
+    await sendMutation({type:'UPDATE_PROJECT_POLICY',data:{policy}}, 'Updated project governance policy');
+    $('#policy-status').textContent = 'Saved';
+  } catch (error) { $('#policy-status').textContent = error.message; }
+});
 $$('#inspector-tabs [data-tab]').forEach(button => button.addEventListener('click', () => {
   inspectorTab = button.dataset.tab;
   const agent = snapshot.agents.find(item => item.id === graphState.selectedId);

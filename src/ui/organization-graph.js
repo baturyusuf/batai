@@ -118,7 +118,7 @@ export function buildCombinedGraph(snapshot, filters = {}) {
     }
   }
   for (const relationship of snapshot.relationships ?? []) {
-    if (relationship.type === 'COLLABORATION' || relationship.type === 'REVIEW') {
+    if (['COLLABORATION', 'REVIEW', 'ADVISORY'].includes(relationship.type)) {
       if (availableAgents.has(relationship.source) && availableAgents.has(relationship.target)) {
         edges.push({...relationship, type: relationship.type});
       }

@@ -4,7 +4,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::organization::{
-    display_title, legacy_identity, AgentFunction, CapabilityProfile, Department, Seniority,
+    display_title, legacy_identity, AgentFunction, AgentLifecycle, AgentPermission, AuthorityRole,
+    CapabilityProfile, Department, IntelligencePolicy, Seniority,
 };
 
 macro_rules! uppercase_enum {
@@ -108,7 +109,19 @@ uppercase_enum!(EventType {
     WorktreeReused,
     WorktreeDirty,
     TaskCancellationRequested,
-    ProviderCrashDetected
+    ProviderCrashDetected,
+    AgentCreated,
+    AgentUpdated,
+    AgentTerminated,
+    OrganizationChanged,
+    RelationshipAdded,
+    RelationshipRemoved,
+    GodDecisionRequired,
+    DecisionResolved,
+    AuditRecorded,
+    ProviderApprovalResolved,
+    ReviewOutcomeRecorded,
+    PolicyChanged
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -131,6 +144,14 @@ pub struct Agent {
     pub model_capabilities: CapabilityProfile,
     #[serde(default)]
     pub effective_capabilities: CapabilityProfile,
+    #[serde(default)]
+    pub lifecycle: AgentLifecycle,
+    #[serde(default)]
+    pub authority: AuthorityRole,
+    #[serde(default)]
+    pub permissions: Vec<AgentPermission>,
+    #[serde(default)]
+    pub intelligence_policy: IntelligencePolicy,
     #[serde(default, alias = "reports_to")]
     pub parent_agent_id: Option<String>,
     pub provider: String,
@@ -158,6 +179,9 @@ impl Agent {
         agent.department = agent
             .department
             .or_else(|| agent.function.map(AgentFunction::department));
+        if agent.function == Some(AgentFunction::Director) {
+            agent.authority = AuthorityRole::Director;
+        }
         agent
     }
 
@@ -188,7 +212,7 @@ impl Agent {
 }
 
 fn default_agent_schema_version() -> u32 {
-    1
+    2
 }
 
 fn default_role() -> String {

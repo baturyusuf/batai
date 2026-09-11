@@ -26,6 +26,7 @@ use crate::runtime::{
 };
 
 type PendingResponse = std::result::Result<Value, String>;
+type ApprovalObserver = Arc<dyn Fn(Value) + Send + Sync>;
 
 struct CodexClient {
     _child: Arc<AsyncMutex<Child>>,
@@ -37,7 +38,10 @@ struct CodexClient {
 }
 
 impl CodexClient {
-    async fn spawn(executable: &str) -> std::result::Result<Arc<Self>, ProviderFailure> {
+    async fn spawn(
+        executable: &str,
+        approval_observer: Option<ApprovalObserver>,
+    ) -> std::result::Result<Arc<Self>, ProviderFailure> {
         let mut child = Command::new(executable)
             .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
@@ -84,6 +88,9 @@ impl CodexClient {
                     continue;
                 };
                 if message.get("method").is_some() && message.get("id").is_some() {
+                    if let Some(observer) = &approval_observer {
+                        observer(message.clone());
+                    }
                     let response = safe_server_request_response(&message);
                     let mut writer = stdin.lock().await;
                     let _ = writer.write_all(format!("{}\n", response).as_bytes()).await;
@@ -215,6 +222,7 @@ pub struct CodexAppServerProvider {
     executable: String,
     client: Arc<AsyncMutex<Option<Arc<CodexClient>>>>,
     active_turns: Arc<Mutex<HashMap<String, String>>>,
+    approval_observer: Option<ApprovalObserver>,
 }
 impl Default for CodexAppServerProvider {
     fn default() -> Self {
@@ -227,14 +235,19 @@ impl CodexAppServerProvider {
             executable: executable.into(),
             client: Default::default(),
             active_turns: Default::default(),
+            approval_observer: None,
         }
+    }
+    pub fn with_approval_observer(mut self, observer: ApprovalObserver) -> Self {
+        self.approval_observer = Some(observer);
+        self
     }
     async fn client(&self) -> std::result::Result<Arc<CodexClient>, ProviderFailure> {
         let mut guard = self.client.lock().await;
         if let Some(client) = guard.as_ref() {
             return Ok(client.clone());
         }
-        let client = CodexClient::spawn(&self.executable).await?;
+        let client = CodexClient::spawn(&self.executable, self.approval_observer.clone()).await?;
         *guard = Some(client.clone());
         Ok(client)
     }

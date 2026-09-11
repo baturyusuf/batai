@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 use crate::runtime::{
     execution_provider::UsageSnapshot,
+    governance::GovernanceSnapshot,
     organization::{CapabilityProfile, OrganizationRelationship},
 };
 
@@ -121,6 +122,11 @@ pub struct AgentView {
     pub usage: UsageSummary,
     pub quota_status: Option<String>,
     pub quota_reset_at: Option<String>,
+    pub lifecycle: String,
+    pub authority: String,
+    pub permissions: Vec<String>,
+    pub intelligence_policy: crate::runtime::organization::IntelligencePolicy,
+    pub history: Vec<ActivityView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -185,7 +191,7 @@ pub struct GodView {
     pub pending_decisions: Option<usize>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AppSnapshot {
     pub god: GodView,
@@ -196,6 +202,7 @@ pub struct AppSnapshot {
     pub resources: Vec<ResourceSummary>,
     pub activity: Vec<ActivityView>,
     pub hierarchy_warnings: Vec<String>,
+    pub governance: GovernanceSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

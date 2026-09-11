@@ -76,16 +76,22 @@ Automated test suite: **28 passing Node tests** at the time of this snapshot.
 - Automatic task-scoped Git worktrees for coding roles, safe reuse/removal, dirty-state inspection and durable execution checkpoints.
 - Conservative crash reconciliation: interrupted mutations become `UNKNOWN_AFTER_CRASH` and require review instead of automatic duplicate execution.
 - Push-based Tauri runtime events with debounced snapshot refresh in the desktop UI.
-- Sixty-three passing Rust tests, including an explicit opt-in authenticated Codex App Server smoke and a separate real inference/worktree acceptance test.
+- Typed Rust governance mutations with GOD/Director/Lead/Worker authority, scoped permissions, optimistic organization revisions and fail-closed policy checks.
+- Task-scoped/project/permanent lifecycle, policy-aware Agent Factory, soft termination, one-Director and hierarchy invariants.
+- Persistent collaboration/review/advisory relationships, external organization file watcher, append-only audit and restart-safe mutation-bound GOD decisions.
+- Separate per-request provider approval ledger; unexpected Codex requests are recorded and auto-denied rather than broadened.
+- Explicit review outcomes and evidence-backed review acceptance metrics, plus typed handoff/meeting foundations.
+- Organization Edit mode, create-agent and relationship forms, explicit mutation confirmations, Decision Ledger, provider approval queue and policy Settings.
+- Seventy-nine passing Rust tests, including an explicit opt-in authenticated Codex App Server smoke and a separate real inference/worktree acceptance test.
 - Manual UI smoke at 1440x900 and 1100x720 with no JavaScript console errors.
 
 The Node HTTP control plane remains as a compatibility layer until the Rust task, event, session and resource engines reach feature parity.
 
 ## Next engineering milestones
 
-1. Add persistent collaboration/review relationship editing and derive temporary meeting groups from events.
-2. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
-3. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.
-4. Port remaining authority and organizational-memory control-plane behavior, then remove the compatibility runtime after parity.
-5. Add native editor/LSP/terminal integration beyond the workspace scaffold.
-6. Add an interactive approval surface so selected provider requests can be reviewed by GOD instead of conservatively cancelled.
+1. Suspend selected live provider requests while awaiting an exact GOD decision, with bounded expiry and restart fail-closed behavior.
+2. Implement meeting scheduling, event-derived temporary graph groups and automatic safe summaries on the typed meeting foundation.
+3. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
+4. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.
+5. Redirect the remaining Node authority/GitHub lifecycle entry points through Rust mutations, then remove the compatibility runtime after parity.
+6. Add native editor/LSP/terminal integration beyond the workspace scaffold.

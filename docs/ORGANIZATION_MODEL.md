@@ -14,6 +14,9 @@ New agent configs may use `schema_version: 2` and these typed fields:
   "seniority": "SENIOR",
   "function": "BACKEND_ENGINEERING",
   "department": "ENGINEERING",
+  "lifecycle": "PROJECT",
+  "authority": "WORKER",
+  "permissions": ["READ_WORKSPACE", "WRITE_WORKSPACE", "RUN_COMMANDS"],
   "parent_agent_id": "director",
   "provider": "codex",
   "model": "auto"
@@ -28,6 +31,8 @@ Legacy configs containing only `role_template` remain readable. Batai parses rec
 
 Department is explicit project organization data. The Rust domain supplies it to the UI; JavaScript does not infer department from role text. Seniority, function, department and `parent_agent_id` belong under `.batai`. Current status, active task, session, tokens and task-run outcomes remain SQLite runtime state.
 
+Authority and permissions are also separate from seniority. A Principal Engineer does not automatically gain organization-management rights. See [Organization Governance](GOVERNANCE.md) for precedence, lifecycle, protected operations, decisions and audit behavior.
+
 ## Capabilities and recommendations
 
 `model_capabilities` describes observed or benchmarked model ability. `effective_capabilities` describes the agent after model, tools, role configuration and Batai history are considered. Both support optional 0-100 scores for coding, debugging, planning, architecture, tool use, instruction following, long context, test generation, review, research, speed and reliability. Unknown scores remain `null` and are never invented.
@@ -38,7 +43,7 @@ The initial configurable recommendation policy uses a function-relevant dimensio
 
 The desktop receives one initial organization snapshot containing virtual GOD metadata, agents, reporting relationships, tasks, active workflow edges, hierarchy warnings, project metrics, resource summaries and a recent observable activity trace. Runtime events then trigger a debounced refresh while preserving mode, selection and viewport.
 
-Performance is derived only when task-run evidence exists: completed/active/failed counts, first-attempt and final success, average attempts and average duration. Review acceptance remains unknown until an explicit review-outcome contract exists. Usage aggregates provider-reported input/output/cached tokens and cost by agent, project and source (`local`, `subscription`, `api`). Missing costs and quota values display as Unknown or an em dash.
+Performance is derived only when evidence exists: completed/active/failed counts, first-attempt and final success, average attempts, average duration and explicit review acceptance. Review acceptance remains unknown until a review outcome is recorded. Usage aggregates provider-reported input/output/cached tokens and cost by agent, project and source (`local`, `subscription`, `api`). Missing costs and quota values display as Unknown or an em dash.
 
 Hidden chain-of-thought is never persisted or displayed. The Activity tab is an execution trace of observable events such as task assignment, worktree creation, provider turn start, changed files, review and completion. Fine-grained activity falls back to Working when the provider exposes no safe signal.
 
@@ -50,10 +55,12 @@ The graph uses a dependency-free SVG renderer so the static Tauri frontend remai
 - Workflow renders the task dependency DAG.
 - Combined renders agents, tasks, ownership/handoffs, dependencies, collaboration and review together.
 
+Organization Edit mode creates agents through the policy-aware Agent Factory, changes reporting through an explicit confirmation, adds/removes collaboration/review/advisory edges, soft-terminates agents and edits project policy. Reporting edges remain derived from `parent_agent_id`; workflow edges remain read-only.
+
 Reporting is solid; collaboration, dependency, handoff and review use distinct dash patterns and labels so color is not the only signal. The canvas supports pan, trackpad pan, modifier-wheel zoom, buttons, fit, reset, search, filters and keyboard focus. Detail changes with zoom. Cycles, missing parents and orphans do not crash layout and are surfaced as warnings.
 
 The Inspector separates organizational identity from assigned intelligence and provides Overview, Tasks, Activity, Usage, Performance and Permissions/Context tabs. With no selection it shows weighted project progress, task/agent state and real known resource totals.
 
 ## Current boundaries
 
-Persistent non-reporting relationship editing and meeting-derived groups are not implemented. Provider event vocabularies do not yet expose reliable reading/testing distinctions for every provider. Promotion workflows, energy estimates, model benchmarking and hidden reasoning are outside this slice.
+Meeting-derived graph groups and live suspended provider approvals are not implemented. Provider event vocabularies do not yet expose reliable reading/testing distinctions for every provider. Energy estimates, full model benchmarking and hidden reasoning are outside this slice.

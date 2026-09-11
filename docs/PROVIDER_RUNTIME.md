@@ -33,7 +33,7 @@ CLI processes are launched with structured executable/argument arrays, an explic
 
 Task-run checkpoints store provider/session/turn identity, managed worktree, branch, base and ending commits, process identity when available, changed files and execution state. If a provider disappears after it may have changed files, the run becomes `UNKNOWN_AFTER_CRASH` and the task moves to `REVIEW`. Batai does not automatically rerun that turn.
 
-Codex App Server approval requests are never auto-accepted. The headless runtime responds with `cancel`/`decline`; the thread uses `workspace-write` with approval policy `never`, so access outside the assigned worktree is not escalated.
+Codex App Server approval requests are never auto-accepted. The runtime records each unexpected request in the distinct provider approval ledger, responds with `cancel`/`decline`, and records that resolution; the thread uses `workspace-write` with approval policy `never`, so access outside the assigned worktree is not escalated. An already denied request is never retroactively executed. Live suspension while GOD decides is a future protocol slice.
 
 ## Worktrees
 

@@ -23,7 +23,22 @@ impl AgentRegistry {
                 normalized.id
             )));
         }
-        self.store.upsert_agent(agent)
+        let mut persisted = agent.clone();
+        if let Some(existing) = self.store.get_agent(&persisted.id)? {
+            let declarative_refresh = persisted.worktree.is_none()
+                && persisted.current_task_id.is_none()
+                && existing.status != persisted.status;
+            if declarative_refresh {
+                persisted.status = existing.status;
+            }
+            if persisted.current_task_id.is_none() {
+                persisted.current_task_id = existing.current_task_id;
+            }
+            if persisted.worktree.is_none() {
+                persisted.worktree = existing.worktree;
+            }
+        }
+        self.store.upsert_agent(&persisted)
     }
     pub fn get(&self, id: &str) -> Result<Option<Agent>> {
         self.store.get_agent(id)

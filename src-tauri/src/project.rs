@@ -72,6 +72,7 @@ impl ProjectStore {
             resources: vec![],
             activity: vec![],
             hierarchy_warnings: vec![],
+            governance: Default::default(),
         })
     }
 

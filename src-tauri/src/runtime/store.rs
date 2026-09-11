@@ -22,6 +22,16 @@ pub struct RuntimeStore {
     connection: Arc<Mutex<Connection>>,
 }
 
+pub struct GovernanceAuditRow<'a> {
+    pub id: &'a str,
+    pub timestamp: &'a str,
+    pub actor: &'a str,
+    pub action: &'a str,
+    pub target: Option<&'a str>,
+    pub outcome: &'a str,
+    pub record_json: String,
+}
+
 impl RuntimeStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
@@ -55,6 +65,115 @@ impl RuntimeStore {
             [],
             |row| row.get(0),
         )?)
+    }
+
+    pub fn upsert_governance_record<T: serde::Serialize>(
+        &self,
+        id: &str,
+        kind: &str,
+        status: &str,
+        record: &T,
+    ) -> Result<()> {
+        let timestamp = now();
+        self.db()?.execute(
+            r#"INSERT INTO governance_records(id,kind,status,record_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+               status=excluded.status,record_json=excluded.record_json,updated_at=excluded.updated_at"#,
+            params![id, kind, status, serde_json::to_string(record)?, timestamp, timestamp],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_governance_records<T: serde::de::DeserializeOwned>(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<T>> {
+        let db = self.db()?;
+        let mut statement = db.prepare(
+            "SELECT record_json FROM governance_records WHERE kind=? ORDER BY created_at DESC",
+        )?;
+        let values = statement
+            .query_map([kind], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn append_governance_audit(&self, row: &GovernanceAuditRow<'_>) -> Result<()> {
+        self.db()?.execute(
+            r#"INSERT OR IGNORE INTO governance_audit
+               (id,timestamp,actor,action,target,outcome,record_json) VALUES(?,?,?,?,?,?,?)"#,
+            params![
+                row.id,
+                row.timestamp,
+                row.actor,
+                row.action,
+                row.target,
+                row.outcome,
+                row.record_json
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_governance_audit<T: serde::de::DeserializeOwned>(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<T>> {
+        let db = self.db()?;
+        let mut statement =
+            db.prepare("SELECT record_json FROM governance_audit ORDER BY sequence DESC LIMIT ?")?;
+        let values = statement
+            .query_map([limit as i64], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn append_review_outcome<T: serde::Serialize>(
+        &self,
+        id: &str,
+        task_id: &str,
+        reviewer_id: &str,
+        subject_agent_id: &str,
+        outcome: &str,
+        record: &T,
+    ) -> Result<()> {
+        self.db()?.execute(
+            r#"INSERT OR IGNORE INTO review_outcomes
+               (id,task_id,reviewer_id,subject_agent_id,outcome,record_json,created_at)
+               VALUES(?,?,?,?,?,?,?)"#,
+            params![
+                id,
+                task_id,
+                reviewer_id,
+                subject_agent_id,
+                outcome,
+                serde_json::to_string(record)?,
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_review_outcomes<T: serde::de::DeserializeOwned>(
+        &self,
+        subject_agent_id: Option<&str>,
+    ) -> Result<Vec<T>> {
+        let db = self.db()?;
+        let (sql, parameter) = match subject_agent_id {
+            Some(id) => ("SELECT record_json FROM review_outcomes WHERE subject_agent_id=? ORDER BY created_at", Some(id)),
+            None => ("SELECT record_json FROM review_outcomes ORDER BY created_at", None),
+        };
+        let mut statement = db.prepare(sql)?;
+        let values = if let Some(parameter) = parameter {
+            statement
+                .query_map([parameter], |row| json_column(row.get::<_, String>(0)?))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            statement
+                .query_map([], |row| json_column(row.get::<_, String>(0)?))?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        Ok(values)
     }
 
     pub fn upsert_agent(&self, agent: &Agent) -> Result<()> {

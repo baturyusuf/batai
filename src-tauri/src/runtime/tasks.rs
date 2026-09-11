@@ -17,6 +17,7 @@ use super::{
     errors::{Result, RuntimeError},
     events::EventEngine,
     execution_provider::provider_failure,
+    organization::AgentLifecycle,
     sessions::SessionManager,
     store::RuntimeStore,
     types::{
@@ -714,6 +715,28 @@ impl TaskEngine {
             payload,
         )?;
         let task = self.required_task(task_id)?;
+        let all_tasks = self.store.list_tasks()?;
+        for agent_id in &task.assigned_to {
+            let has_other_work = all_tasks.iter().any(|candidate| {
+                candidate.id != task.id
+                    && candidate.assigned_to.contains(agent_id)
+                    && !matches!(
+                        candidate.status,
+                        TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Failed
+                    )
+            });
+            if !has_other_work {
+                if let Some(agent) = self.agents.get(agent_id)? {
+                    if agent.schema_version >= 2
+                        && agent.lifecycle == AgentLifecycle::TaskScoped
+                        && agent.status != AgentStatus::Terminated
+                    {
+                        self.agents
+                            .transition(agent_id, AgentStatus::Terminated, None)?;
+                    }
+                }
+            }
+        }
         let mut candidates = task.on_success.start;
         for candidate in self.store.list_tasks()? {
             if candidate.dependencies.contains(&task_id.to_owned()) {

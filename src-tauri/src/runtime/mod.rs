@@ -2,6 +2,7 @@ pub mod agents;
 pub mod errors;
 pub mod events;
 pub mod execution_provider;
+pub mod governance;
 pub mod migrations;
 pub mod organization;
 pub mod scheduler;
@@ -31,12 +32,13 @@ use agents::AgentRegistry;
 use errors::Result;
 use events::EventEngine;
 use execution_provider::{ExecutionProvider, MockProvider};
+use governance::GovernanceService;
 use organization::{hierarchy_warnings, OrganizationRelationship, RelationshipType};
 use scheduler::DurableScheduler;
 use sessions::SessionManager;
 use store::RuntimeStore;
 use tasks::TaskEngine;
-use watcher::TaskWatcher;
+use watcher::{OrganizationWatcher, TaskWatcher};
 
 pub struct BataiRuntime {
     root: PathBuf,
@@ -45,28 +47,36 @@ pub struct BataiRuntime {
     pub agents: AgentRegistry,
     pub tasks: Arc<TaskEngine>,
     pub sessions: SessionManager,
+    pub governance: GovernanceService,
     watcher: Mutex<Option<TaskWatcher>>,
+    organization_watcher: Mutex<Option<OrganizationWatcher>>,
     scheduler: tokio::sync::Mutex<Option<DurableScheduler>>,
 }
 
 impl BataiRuntime {
     pub fn open(root: PathBuf) -> Result<Arc<Self>> {
         let store = RuntimeStore::open(root.join(".runtime/runtime.sqlite"))?;
+        let events = EventEngine::new(store.clone());
+        let agents = AgentRegistry::new(store.clone(), events.clone());
+        let governance =
+            GovernanceService::new(root.clone(), store.clone(), agents.clone(), events.clone());
         let mock = Arc::new(MockProvider::default());
         let mut providers = HashMap::<String, Arc<dyn ExecutionProvider>>::new();
         providers.insert("mock".into(), mock);
-        providers.insert("codex".into(), Arc::new(CodexAppServerProvider::default()));
-        providers.insert(
-            "codex-app-server".into(),
-            Arc::new(CodexAppServerProvider::default()),
-        );
+        let approval_governance = governance.clone();
+        let codex =
+            CodexAppServerProvider::default().with_approval_observer(Arc::new(move |request| {
+                let _ = approval_governance.record_provider_auto_denial("codex", request);
+            }));
+        providers.insert("codex".into(), Arc::new(codex.clone()));
+        providers.insert("codex-app-server".into(), Arc::new(codex));
         providers.insert("claude".into(), Arc::new(ClaudeCodeProvider::default()));
         providers.insert(
             "claude-code".into(),
             Arc::new(ClaudeCodeProvider::default()),
         );
         providers.insert("ollama".into(), Arc::new(OllamaProvider::default()));
-        Self::with_store(root, store, providers)
+        Self::with_components(root, store, events, agents, governance, providers)
     }
 
     pub fn with_store(
@@ -76,6 +86,19 @@ impl BataiRuntime {
     ) -> Result<Arc<Self>> {
         let events = EventEngine::new(store.clone());
         let agents = AgentRegistry::new(store.clone(), events.clone());
+        let governance =
+            GovernanceService::new(root.clone(), store.clone(), agents.clone(), events.clone());
+        Self::with_components(root, store, events, agents, governance, providers)
+    }
+
+    fn with_components(
+        root: PathBuf,
+        store: RuntimeStore,
+        events: EventEngine,
+        agents: AgentRegistry,
+        governance: GovernanceService,
+        providers: HashMap<String, Arc<dyn ExecutionProvider>>,
+    ) -> Result<Arc<Self>> {
         let sessions = SessionManager::new(store.clone(), providers);
         let mut task_engine = TaskEngine::new(
             store.clone(),
@@ -95,7 +118,9 @@ impl BataiRuntime {
             agents,
             tasks,
             sessions,
+            governance,
             watcher: Mutex::new(None),
+            organization_watcher: Mutex::new(None),
             scheduler: tokio::sync::Mutex::new(None),
         }))
     }
@@ -115,6 +140,17 @@ impl BataiRuntime {
             .watcher
             .lock()
             .map_err(|_| errors::RuntimeError::Lock("watcher"))? = Some(watcher);
+        let organization_watcher = OrganizationWatcher::start(
+            &self.root.join(".batai"),
+            self.governance.clone(),
+            self.events.clone(),
+            Duration::from_millis(150),
+        )?;
+        *self
+            .organization_watcher
+            .lock()
+            .map_err(|_| errors::RuntimeError::Lock("organization watcher"))? =
+            Some(organization_watcher);
         *self.scheduler.lock().await = Some(DurableScheduler::start(
             self.store.clone(),
             self.events.clone(),
@@ -134,6 +170,14 @@ impl BataiRuntime {
             .map_err(|_| errors::RuntimeError::Lock("watcher"))?
             .take();
         if let Some(mut watcher) = watcher {
+            watcher.shutdown()?;
+        }
+        if let Some(mut watcher) = self
+            .organization_watcher
+            .lock()
+            .map_err(|_| errors::RuntimeError::Lock("organization watcher"))?
+            .take()
+        {
             watcher.shutdown()?;
         }
         if let Some(mut scheduler) = self.scheduler.lock().await.take() {
@@ -256,7 +300,8 @@ impl BataiRuntime {
                 .function
                 .and_then(enum_name)
                 .unwrap_or_else(|| "GENERIC_SOFTWARE_AGENT".into());
-            let performance = performance_summary(&runs);
+            let mut performance = performance_summary(&runs);
+            performance.review_acceptance_rate = self.governance.review_acceptance(&agent.id)?;
             let latest_event = events.iter().find(|event| {
                 event.source == agent.id || event.target.as_deref() == Some(&agent.id)
             });
@@ -300,6 +345,30 @@ impl BataiRuntime {
                 usage,
                 quota_status: resource.as_ref().map(|state| state.status.to_string()),
                 quota_reset_at: resource.and_then(|state| state.reset_at),
+                lifecycle: enum_name(agent.lifecycle).unwrap_or_else(|| "TASK_SCOPED".into()),
+                authority: enum_name(agent.authority).unwrap_or_else(|| "WORKER".into()),
+                permissions: agent
+                    .permissions
+                    .iter()
+                    .filter_map(|permission| enum_name(*permission))
+                    .collect(),
+                intelligence_policy: agent.intelligence_policy,
+                history: events
+                    .iter()
+                    .filter(|event| {
+                        event.source == agent.id || event.target.as_deref() == Some(&agent.id)
+                    })
+                    .take(50)
+                    .map(|event| ActivityView {
+                        summary: event_summary(event),
+                        id: event.id.clone(),
+                        timestamp: event.timestamp.clone(),
+                        event_type: event.event_type.to_string(),
+                        source: event.source.clone(),
+                        target: event.target.clone(),
+                        task_id: event.task_id.clone(),
+                    })
+                    .collect(),
             });
         }
         let tasks = runtime_tasks
@@ -314,7 +383,8 @@ impl BataiRuntime {
                 progress: task_progress(&task.status.to_string()),
             })
             .collect::<Vec<_>>();
-        let relationships = organization_relationships(&runtime_tasks, &agents);
+        let mut relationships = organization_relationships(&runtime_tasks, &agents);
+        relationships.extend(self.governance.persistent_relationships()?);
         let activity = events
             .into_iter()
             .rev()
@@ -360,12 +430,19 @@ impl BataiRuntime {
             usage: project_usage,
             usage_by_source: project_usage_by_source,
         };
+        let governance = self.governance.snapshot()?;
         Ok(AppSnapshot {
             god: GodView {
                 id: "god".into(),
                 label: "User".into(),
                 authority: "Highest authority".into(),
-                pending_decisions: None,
+                pending_decisions: Some(
+                    governance
+                        .decisions
+                        .iter()
+                        .filter(|decision| decision.status == governance::DecisionStatus::Open)
+                        .count(),
+                ),
             },
             project,
             agents,
@@ -374,6 +451,7 @@ impl BataiRuntime {
             resources: resources_by_provider.into_values().collect(),
             activity,
             hierarchy_warnings: hierarchy_warnings(&parents),
+            governance,
         })
     }
 }

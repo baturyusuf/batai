@@ -12,6 +12,9 @@ use tauri::Emitter;
 
 use domain::{AppSnapshot, ConnectionGuide, MessageReceipt, ProviderConnection};
 use project::{discover_project_root, ProjectStore};
+use runtime::governance::{
+    AuthorityScope, MutationRequest, MutationResult, ProviderApproval, ReviewOutcome,
+};
 
 struct AppState {
     project: ProjectStore,
@@ -56,6 +59,61 @@ async fn cancel_task(task_id: String, state: tauri::State<'_, AppState>) -> Resu
         .map_err(|error| error.to_string())
 }
 
+#[tauri::command]
+fn mutate_organization(
+    mut request: MutationRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<MutationResult, String> {
+    // Desktop organization editing is an explicit human/GOD interaction. Agent-originated
+    // mutations enter through the runtime API and cannot claim this identity.
+    request.actor.id = "god".into();
+    request.actor.scope = AuthorityScope::Project;
+    state
+        .runtime
+        .governance
+        .mutate(request)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn resolve_god_decision(
+    decision_id: String,
+    approve: bool,
+    note: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<MutationResult, String> {
+    state
+        .runtime
+        .governance
+        .resolve_decision(&decision_id, approve, note)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn resolve_provider_approval(
+    approval_id: String,
+    approve: bool,
+    state: tauri::State<'_, AppState>,
+) -> Result<ProviderApproval, String> {
+    state
+        .runtime
+        .governance
+        .resolve_provider_approval(&approval_id, approve)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn record_review_outcome(
+    review: ReviewOutcome,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .runtime
+        .governance
+        .record_review(review)
+        .map_err(|error| error.to_string())
+}
+
 fn main() {
     let project_root = std::env::var_os("BATAI_PROJECT_ROOT")
         .map(PathBuf::from)
@@ -76,7 +134,11 @@ fn main() {
             get_provider_connections,
             get_connection_guide,
             send_director_message,
-            cancel_task
+            cancel_task,
+            mutate_organization,
+            resolve_god_decision,
+            resolve_provider_approval,
+            record_review_outcome
         ])
         .build(tauri::generate_context!())
         .expect("error while building Batai desktop shell");

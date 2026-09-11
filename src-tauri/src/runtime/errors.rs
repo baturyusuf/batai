@@ -44,6 +44,10 @@ pub enum RuntimeError {
     Cancelled(String),
     #[error("provider stopped after possible repository mutation: {0}")]
     UnknownAfterCrash(String),
+    #[error("governance error: {0}")]
+    Governance(String),
+    #[error("organization revision conflict: expected {expected}, current {current}")]
+    OrganizationConflict { expected: u64, current: u64 },
 }
 
 pub type Result<T> = std::result::Result<T, RuntimeError>;

@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use super::errors::Result;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 7;
 
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(
@@ -103,6 +103,43 @@ pub fn migrate(connection: &mut Connection) -> Result<()> {
         connection,
         4,
         "CREATE INDEX IF NOT EXISTS idx_task_runs_status ON task_runs(status, updated_at);",
+    )?;
+    apply(
+        connection,
+        5,
+        r#"
+        CREATE TABLE IF NOT EXISTS governance_records (
+          id TEXT PRIMARY KEY, kind TEXT NOT NULL, status TEXT NOT NULL,
+          record_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_governance_kind_status
+          ON governance_records(kind, status, updated_at);
+        "#,
+    )?;
+    apply(
+        connection,
+        6,
+        r#"
+        CREATE TABLE IF NOT EXISTS governance_audit (
+          sequence INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT UNIQUE NOT NULL,
+          timestamp TEXT NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL,
+          target TEXT, outcome TEXT NOT NULL, record_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_governance_audit_timestamp
+          ON governance_audit(timestamp);
+        "#,
+    )?;
+    apply(
+        connection,
+        7,
+        r#"
+        CREATE TABLE IF NOT EXISTS review_outcomes (
+          id TEXT PRIMARY KEY, task_id TEXT NOT NULL, reviewer_id TEXT NOT NULL,
+          subject_agent_id TEXT NOT NULL, outcome TEXT NOT NULL,
+          record_json TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_review_subject ON review_outcomes(subject_agent_id, created_at);
+        "#,
     )?;
     Ok(())
 }
