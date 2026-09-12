@@ -24,7 +24,7 @@
 - Web control plane
 - HTTP control-plane validation for malformed JSON and invalid payloads
 
-Automated compatibility/UI suite: **35 passing Node tests** at the time of this snapshot.
+Automated compatibility/UI suite: **37 passing Node tests** at the time of this snapshot.
 
 ## Implemented and smoke-tested at protocol/process level
 
@@ -89,14 +89,18 @@ Automated compatibility/UI suite: **35 passing Node tests** at the time of this 
 - Ollama inventory/details/running-model/pull-progress/cancellation/removal APIs, conservative local catalog fit and an isolated deterministic benchmark suite.
 - Kimi Code, Z.AI Coding Plan and MiniMax Token Plan subscription adapters over shared OpenAI-compatible transport, provider-specific verified model catalogs, error handling and operating-system vault credentials.
 - Intelligence Portfolio, Local AI setup, model download/benchmark actions, role-specific recommendations and task/agent routing explanations in the desktop UI.
-- One hundred sixteen passing Rust tests, including hardware, benchmark, fake Ollama/provider HTTP, storage, opt-in provider smoke and pre-dispatch economic routing coverage.
+- Compact task-outcome evidence with quality/retry/failure classification, review/test validation, task-difficulty normalization and routing-decision correlation.
+- Deterministic calibrated capability profiles with recency, sample/diversity confidence, per-source provenance, hardware-aware latency and disagreement-safe routing estimates.
+- Versioned routing calibration, shadow rankings, no-inference offline replay, manual audited GOD evidence and governance-only promotion suggestions.
+- Capability Evidence, Router Calibration, Routing History and replay views; connection smoke remains connectivity-only and Z.AI warning acknowledgement does not bypass terms eligibility.
+- One hundred thirty-three passing Rust tests, including capability learning, governance, hardware, benchmark, fake provider, storage and confidence-aware routing coverage.
 - Manual UI smoke at 1440x900 and 1100x720 with no JavaScript console errors.
 
 The Node HTTP control plane remains as a compatibility layer until the Rust task, event, session and resource engines reach feature parity.
 
 ## Next engineering milestones
 
-1. Calibrate routing weights with opt-in real-task outcome evidence and add governed manual capability editing for hosted resources.
+1. Run an opt-in longitudinal calibration pilot with reviewed production tasks, then tune thresholds through the suggestion/replay workflow.
 2. Implement meeting scheduling, event-derived temporary graph groups and automatic safe summaries on the typed meeting foundation.
 3. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
 4. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.

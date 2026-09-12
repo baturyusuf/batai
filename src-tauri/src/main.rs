@@ -13,7 +13,8 @@ use tauri::Emitter;
 use domain::{AppSnapshot, ConnectionGuide, MessageReceipt, ProviderConnection};
 use project::{discover_project_root, ProjectStore};
 use runtime::governance::{
-    AuthorityScope, MutationRequest, MutationResult, ProviderApproval, ReviewOutcome,
+    Actor, AuthorityScope, ManualCapabilityEdit, MutationRequest, MutationResult, ProviderApproval,
+    ReviewOutcome,
 };
 use runtime::recovery::{OperationJournal, RecoveryAction};
 
@@ -242,6 +243,195 @@ fn update_economic_policy(
 }
 
 #[tauri::command]
+fn update_capability_learning_policy(
+    policy: runtime::learning::CapabilityLearningPolicy,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    state
+        .runtime
+        .store
+        .set_capability_learning_policy(&policy)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn add_manual_capability_evidence(
+    resource_id: String,
+    model: Option<String>,
+    dimension: String,
+    score: u8,
+    note: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<runtime::economic::ResourceProfile, String> {
+    state
+        .runtime
+        .governance
+        .record_manual_capability(ManualCapabilityEdit {
+            actor: Actor {
+                id: "god".into(),
+                scope: AuthorityScope::Project,
+            },
+            resource_id,
+            model,
+            dimension,
+            score,
+            note,
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn acknowledge_resource_terms(
+    resource_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<runtime::economic::ResourceProfile, String> {
+    state
+        .runtime
+        .governance
+        .acknowledge_resource_terms(
+            &resource_id,
+            Actor {
+                id: "god".into(),
+                scope: AuthorityScope::Project,
+            },
+        )
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn replay_routing_decision(
+    decision_id: String,
+    policy: runtime::economic::EconomicPolicy,
+    state: tauri::State<'_, AppState>,
+) -> Result<runtime::learning::RouterReplayResult, String> {
+    let original = state
+        .runtime
+        .store
+        .get_routing_decision(&decision_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Routing decision not found".to_string())?;
+    let resources = if original.resource_snapshot.is_empty() {
+        state
+            .runtime
+            .store
+            .list_intelligence_resources()
+            .map_err(|error| error.to_string())?
+    } else {
+        original.resource_snapshot.clone()
+    };
+    let outcomes = state
+        .runtime
+        .store
+        .list_task_outcomes(None, 10_000)
+        .map_err(|error| error.to_string())?;
+    let learning_policy = state
+        .runtime
+        .store
+        .capability_learning_policy()
+        .map_err(|error| error.to_string())?;
+    let replayed = runtime::economic::QuotaAwareEconomicRouter.route_with_evidence(
+        &original.task_id,
+        &original.requirements,
+        &resources,
+        &policy,
+        &outcomes,
+        &learning_policy,
+        chrono::Utc::now(),
+    );
+    let actual = outcomes
+        .iter()
+        .find(|outcome| outcome.routing_decision_id.as_deref() == Some(&original.id));
+    let billing = |id: Option<&String>| {
+        id.and_then(|id| {
+            resources
+                .iter()
+                .find(|resource| &resource.id == id)
+                .map(|resource| resource.billing_mode)
+        })
+    };
+    Ok(runtime::learning::replay_result(
+        &original,
+        &replayed,
+        actual,
+        billing(original.selected_resource_id.as_ref()),
+        billing(replayed.selected_resource_id.as_ref()),
+    ))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectionTestResult {
+    status: String,
+    detail: String,
+    latency_ms: Option<u64>,
+}
+
+#[tauri::command]
+async fn test_resource_connection(
+    resource_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ConnectionTestResult, String> {
+    let profile = state
+        .runtime
+        .store
+        .list_intelligence_resources()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|profile| profile.id == resource_id)
+        .ok_or_else(|| "Resource not found".to_string())?;
+    if !matches!(
+        resource_id.as_str(),
+        "kimi-personal-membership" | "zai-coding-plan" | "minimax-token-plan"
+    ) {
+        return Err("Connection smoke is limited to hosted subscription adapters".into());
+    }
+    let mut agent: runtime::types::Agent = serde_json::from_value(serde_json::json!({
+        "id":"connection-smoke","name":"Connection smoke","role_template":"Agent",
+        "provider":profile.provider,"model":profile.supported_models.first().cloned().unwrap_or_default(),
+        "status":"READY"
+    }))
+    .map_err(|error| error.to_string())?;
+    agent.worktree = None;
+    let task: runtime::types::Task = serde_json::from_value(serde_json::json!({
+        "id":"connection-smoke","created_by":"god",
+        "objective":"Reply with exactly BATAI_CONNECTION_OK. Do not call tools or modify files.",
+        "assigned_to":["connection-smoke"],"status":"READY"
+    }))
+    .map_err(|error| error.to_string())?;
+    let provider = state
+        .runtime
+        .sessions
+        .provider_for(&agent)
+        .map_err(|error| error.to_string())?;
+    let started = std::time::Instant::now();
+    let session = provider
+        .create_session(&agent)
+        .await
+        .map_err(|error| error.to_string())?;
+    match provider.send_task(&session.id, &agent, &task).await {
+        Ok(_) => Ok(ConnectionTestResult {
+            status: "CONNECTED".into(),
+            detail: "Safe low-token inference completed; no capability evidence was created".into(),
+            latency_ms: Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+        }),
+        Err(error) => {
+            let status = match error {
+                runtime::execution_provider::ProviderFailure::AuthRequired => "AUTH_FAILED",
+                runtime::execution_provider::ProviderFailure::RateLimited { .. } => "RATE_LIMITED",
+                _ => "ERROR",
+            };
+            Ok(ConnectionTestResult {
+                status: status.into(),
+                detail: providers::process_supervisor::redact_secrets(&format!(
+                    "Connection test failed: {error:?}"
+                )),
+                latency_ms: None,
+            })
+        }
+    }
+}
+
+#[tauri::command]
 fn send_director_message(
     content: String,
     state: tauri::State<'_, AppState>,
@@ -361,6 +551,11 @@ fn main() {
             disconnect_resource,
             update_intelligence_resource,
             update_economic_policy,
+            update_capability_learning_policy,
+            add_manual_capability_evidence,
+            acknowledge_resource_terms,
+            replay_routing_decision,
+            test_resource_connection,
             send_director_message,
             cancel_task,
             mutate_organization,

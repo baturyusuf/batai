@@ -78,6 +78,13 @@ impl ProjectStore {
             intelligence_resources: vec![],
             economic_policy: Default::default(),
             routing_decisions: vec![],
+            task_outcomes: vec![],
+            calibrated_capabilities: vec![],
+            routing_calibrations: vec![],
+            calibration_dashboard: Default::default(),
+            calibration_suggestions: vec![],
+            promotion_suggestions: vec![],
+            capability_learning_policy: Default::default(),
         })
     }
 

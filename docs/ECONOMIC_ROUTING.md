@@ -20,11 +20,15 @@ Unknown terms, quality, quota and marginal cost remain unknown. A candidate requ
 
 The result is either `SELECTED` or `NO_SUITABLE_RESOURCE`. A no-selection result proposes explicit options—install/benchmark local capacity, wait for quota, or ask GOD to permit PAYG—rather than assigning a weak model.
 
-Every decision records candidates, hard rejection reasons, score components, selected resource/model, generic reasoning effort, policy and a user-facing rationale. This is an observable deterministic explanation, not hidden chain-of-thought.
+Every decision records candidates, hard rejection reasons, score components, selected resource/model, ordered shadow candidates, generic reasoning effort, task-taxonomy/router/policy versions and a user-facing rationale. This is an observable deterministic explanation, not hidden chain-of-thought.
+
+The quality stage uses the conservative estimate from the [capability-learning model](CAPABILITY_LEARNING.md), not a raw mean. Low confidence increases the safety margin; high-risk tasks reject evidence below the configured confidence gate. Benchmark/history disagreement is visible and adds a bounded conservative penalty. Confidence is an uncertainty control, not a reward that lets the most frequently selected provider win forever.
 
 ## Runtime boundary
 
 Existing explicit agents stay on their configured provider/model. New agents created with automatic intelligence use provider `auto`; routing occurs at the attempt boundary before a worktree or provider session begins. The chosen resource and explanation enter the task-run checkpoint. An active turn is never moved to another provider. Automatic reroute after exhaustion is disabled by default.
+
+Each completed or failed attempt can create compact outcome evidence and a routing calibration record. Offline replay reruns only deterministic selection against the decision's historical resource snapshot. It performs no inference and never assigns an outcome or claimed savings to an unselected alternative.
 
 PAYG remains disabled by default and is also constrained by the agent policy. A future non-zero PAYG threshold must enter the existing GOD governance/Decision Ledger rather than creating a second approval system.
 
@@ -39,7 +43,8 @@ Provider contracts were checked against official documentation on 2026-09-11:
 
 No OAuth extraction, consumer UI automation, user-agent spoofing, account rotation, quota evasion or silent PAYG is implemented.
 
+A GOD acknowledgement records that the Z.AI terms warning was seen and writes an audit entry. It deliberately does **not** convert `REQUIRES_REVIEW` to `ALLOWED`; acknowledgement cannot change the provider's terms or bypass the router's eligibility gate.
+
 ## Score interpretation
 
 The initial score is deliberately a configurable heuristic, not a scientific optimum. Quality carries a hard sufficiency constraint before economics is ranked. The score combines economic preference, availability and capability only for eligible candidates. Task risk increases the quality threshold. Quota reset adds a bounded preference only when documented unused capacity is known.
-

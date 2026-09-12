@@ -17,3 +17,35 @@ export function routingSummary(decision) {
   if (!decision || decision.outcome !== 'SELECTED') return 'No suitable resource';
   return `${decision.selectedResourceId} · ${decision.selectedModel ?? 'provider managed'}`;
 }
+
+export const CAPABILITY_DIMENSIONS = ['coding','debugging','planning','architecture','tool_use','instruction_following','long_context','test_generation','review','research','speed','reliability'];
+
+export function confidenceLabel(dimension) {
+  if (!dimension || (dimension.estimatedScore == null && dimension.score == null)) return 'Unknown';
+  return String(dimension.confidenceBand ?? 'VERY_LOW').toLowerCase().replaceAll('_',' ').replace(/\b\w/g, value => value.toUpperCase());
+}
+
+export function capabilityEvidenceRows(profile) {
+  if (!profile?.dimensions) return [];
+  return Object.entries(profile.dimensions).sort(([left],[right]) => left.localeCompare(right)).map(([dimension,value]) => ({
+    dimension,
+    score:value.estimatedScore,
+    routingEstimate:value.routingEstimate,
+    confidence:value.confidence,
+    confidenceBand:value.confidenceBand,
+    samples:value.sampleCount ?? 0,
+    disagreement:Boolean(value.disagreement),
+    sources:Object.entries(value.evidenceComposition ?? {}).map(([source,count]) => ({source,count}))
+  }));
+}
+
+export function calibrationPercent(value) {
+  return value == null ? '—' : `${Math.round(Number(value) * 1000) / 10}%`;
+}
+
+export function replaySummary(result) {
+  if (!result) return 'Replay unavailable';
+  const original=result.originalResourceId ?? 'No selection';
+  const next=result.replayResourceId ?? 'No selection';
+  return `${original} → ${next}`;
+}

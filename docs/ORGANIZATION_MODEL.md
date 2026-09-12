@@ -41,6 +41,8 @@ The initial configurable recommendation policy uses a function-relevant dimensio
 
 Capability evidence retains its source (`EXTERNAL_BENCHMARK`, `BATAI_BENCHMARK`, `REAL_TASK_HISTORY`, `MANUAL` or `UNKNOWN`), timestamp, sample count and optional hardware fingerprint. Local automatic role recommendations are capped at L4 Senior; Staff, Principal and Director placement remains governance-mediated.
 
+Real-task evidence produces a separate calibrated profile with sample count, confidence, per-source composition and disagreement state. Promotion is only a governance suggestion based on repeated validated work at the next difficulty band; one success/failure never changes organizational seniority automatically. Manual capability evidence is a GOD-attributed audited addition, not an override that deletes other provenance.
+
 `IntelligencePolicy.assignment = AUTO` is activated for new agents through provider `auto`. Preferred local/subscription sources and PAYG permission constrain the economic router. Explicit legacy agents retain their provider/model unchanged. A routing decision belongs to a task attempt, not to the agent's durable organizational identity.
 
 ## Organization snapshot and telemetry

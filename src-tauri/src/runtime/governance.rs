@@ -26,7 +26,8 @@ use super::{
     },
     organization::{
         hierarchy_warnings, AgentFunction, AgentLifecycle, AgentPermission, AuthorityRole,
-        Department, IntelligencePolicy, OrganizationRelationship, RelationshipType, Seniority,
+        CapabilityScore, Department, IntelligencePolicy, OrganizationRelationship,
+        RelationshipType, Seniority,
     },
     recovery::{
         agent_db_entity, json_bytes, OperationJournal, RecoveryAction, RecoveryEngine,
@@ -455,6 +456,17 @@ pub struct ReviewOutcome {
     pub outcome: ReviewOutcomeKind,
     pub note: Option<String>,
     pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualCapabilityEdit {
+    pub actor: Actor,
+    pub resource_id: String,
+    pub model: Option<String>,
+    pub dimension: String,
+    pub score: u8,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1217,9 +1229,209 @@ impl GovernanceService {
             review.reviewer_id.clone(),
             Some(review.subject_agent_id.clone()),
             Some(review.task_id.clone()),
-            serde_json::to_value(review)?,
+            serde_json::to_value(&review)?,
         )?;
+        if let Some(mut evidence) = self
+            .store
+            .task_outcome(&review.task_id, &review.subject_agent_id)?
+        {
+            evidence.apply_review(&review);
+            self.store.save_task_outcome(&evidence)?;
+            if let Some(decision_id) = &evidence.routing_decision_id {
+                if let Some(decision) = self.store.get_routing_decision(decision_id)? {
+                    let resources = self.store.list_intelligence_resources()?;
+                    let outcomes = self
+                        .store
+                        .list_task_outcomes(Some(&evidence.resource_id), 10_000)?;
+                    let policy = self.store.capability_learning_policy()?;
+                    let calibrated = resources
+                        .iter()
+                        .find(|resource| resource.id == evidence.resource_id)
+                        .map(|resource| {
+                            super::learning::CapabilityLearner.calibrate_model(
+                                resource,
+                                Some(&evidence.model),
+                                &outcomes,
+                                &policy,
+                                Utc::now(),
+                            )
+                        });
+                    if let Some(record) = super::learning::calibration_record(
+                        &decision,
+                        &evidence,
+                        calibrated.as_ref(),
+                    ) {
+                        self.store.save_routing_calibration(&record)?;
+                        self.events.publish(
+                            EventType::RouterCalibrationUpdated,
+                            "batai",
+                            Some(evidence.agent_id.clone()),
+                            Some(evidence.task_id.clone()),
+                            serde_json::to_value(record)?,
+                        )?;
+                    }
+                }
+            }
+        }
         Ok(())
+    }
+
+    pub fn record_manual_capability(
+        &self,
+        edit: ManualCapabilityEdit,
+    ) -> Result<super::economic::ResourceProfile> {
+        let authority = self.resolve_authority(&edit.actor.id)?;
+        if authority != AuthorityRole::God {
+            return Err(RuntimeError::Governance(
+                "only GOD can add manual capability evidence".into(),
+            ));
+        }
+        if !super::learning::CAPABILITY_DIMENSIONS.contains(&edit.dimension.as_str()) {
+            return Err(RuntimeError::Governance(format!(
+                "unknown capability dimension: {}",
+                edit.dimension
+            )));
+        }
+        let score = CapabilityScore::new(edit.score).map_err(RuntimeError::Governance)?;
+        let note = edit
+            .note
+            .as_deref()
+            .map(super::super::providers::process_supervisor::redact_secrets);
+        let mut resource = self
+            .store
+            .list_intelligence_resources()?
+            .into_iter()
+            .find(|resource| resource.id == edit.resource_id)
+            .ok_or_else(|| RuntimeError::Governance("resource not found".into()))?;
+        if let Some(model) = edit.model.as_deref() {
+            if !resource.supported_models.is_empty()
+                && !resource.supported_models.iter().any(|value| value == model)
+            {
+                return Err(RuntimeError::Governance(format!(
+                    "model {model} is not declared by resource {}",
+                    resource.id
+                )));
+            }
+        }
+        resource
+            .capability_evidence
+            .push(super::economic::CapabilityEvidence {
+                dimension: edit.dimension.clone(),
+                score,
+                source: super::economic::CapabilityEvidenceSource::Manual,
+                model: edit.model.clone(),
+                observed_at: Utc::now().to_rfc3339(),
+                hardware_fingerprint: None,
+                sample_count: 1,
+                note: Some(format!(
+                    "GOD{}",
+                    note.as_deref()
+                        .filter(|note| !note.trim().is_empty())
+                        .map(|note| format!(": {note}"))
+                        .unwrap_or_default()
+                )),
+            });
+        self.store.upsert_intelligence_resource(&resource)?;
+        let record = AuditRecord {
+            id: format!("AUD-{}", uuid::Uuid::new_v4()),
+            timestamp: Utc::now().to_rfc3339(),
+            actor: edit.actor.id,
+            authority,
+            action: "MANUAL_CAPABILITY_EVIDENCE".into(),
+            target: Some(format!(
+                "{}:{}:{}",
+                edit.resource_id,
+                edit.model.as_deref().unwrap_or("all-models"),
+                edit.dimension
+            )),
+            outcome: MutationDisposition::Applied,
+            reason: note,
+            decision_id: None,
+            task_id: None,
+            revision: self.load_organization()?.revision,
+        };
+        let outcome = format!("{:?}", record.outcome).to_ascii_uppercase();
+        self.store.append_governance_audit(&GovernanceAuditRow {
+            id: &record.id,
+            timestamp: &record.timestamp,
+            actor: &record.actor,
+            action: &record.action,
+            target: record.target.as_deref(),
+            outcome: &outcome,
+            record_json: serde_json::to_string(&record)?,
+        })?;
+        self.events.publish(
+            EventType::ManualCapabilityUpdated,
+            record.actor,
+            record.target,
+            None,
+            serde_json::json!({"resourceId":resource.id,"model":edit.model,"dimension":edit.dimension,"score":edit.score}),
+        )?;
+        Ok(resource)
+    }
+
+    pub fn acknowledge_resource_terms(
+        &self,
+        resource_id: &str,
+        actor: Actor,
+    ) -> Result<super::economic::ResourceProfile> {
+        let authority = self.resolve_authority(&actor.id)?;
+        if authority != AuthorityRole::God {
+            return Err(RuntimeError::Governance(
+                "only GOD can acknowledge resource terms".into(),
+            ));
+        }
+        let mut resource = self
+            .store
+            .list_intelligence_resources()?
+            .into_iter()
+            .find(|resource| resource.id == resource_id)
+            .ok_or_else(|| RuntimeError::Governance("resource not found".into()))?;
+        if resource.terms.allowed_use_mode != super::economic::TermsState::RequiresReview {
+            return Err(RuntimeError::Governance(
+                "resource does not currently require terms review".into(),
+            ));
+        }
+        let timestamp = Utc::now().to_rfc3339();
+        resource.terms.acknowledged_at = Some(timestamp.clone());
+        resource.terms.acknowledged_by = Some(actor.id.clone());
+        self.store.upsert_intelligence_resource(&resource)?;
+
+        let record = AuditRecord {
+            id: format!("AUD-{}", uuid::Uuid::new_v4()),
+            timestamp,
+            actor: actor.id,
+            authority,
+            action: "RESOURCE_TERMS_ACKNOWLEDGED".into(),
+            target: Some(resource_id.to_owned()),
+            outcome: MutationDisposition::Applied,
+            reason: Some("Warning acknowledged; terms eligibility remains REQUIRES_REVIEW".into()),
+            decision_id: None,
+            task_id: None,
+            revision: self.load_organization()?.revision,
+        };
+        let outcome = format!("{:?}", record.outcome).to_ascii_uppercase();
+        self.store.append_governance_audit(&GovernanceAuditRow {
+            id: &record.id,
+            timestamp: &record.timestamp,
+            actor: &record.actor,
+            action: &record.action,
+            target: record.target.as_deref(),
+            outcome: &outcome,
+            record_json: serde_json::to_string(&record)?,
+        })?;
+        self.events.publish(
+            EventType::ResourceTermsAcknowledged,
+            record.actor,
+            record.target,
+            None,
+            serde_json::json!({
+                "resourceId": resource.id,
+                "acknowledgedAt": resource.terms.acknowledged_at,
+                "eligibility": resource.terms.allowed_use_mode
+            }),
+        )?;
+        Ok(resource)
     }
 
     pub fn review_acceptance(&self, agent_id: &str) -> Result<Option<f64>> {
@@ -2974,6 +3186,108 @@ mod tests {
             harness.service.review_acceptance("worker").unwrap(),
             Some(50.0)
         );
+    }
+
+    #[test]
+    fn god_can_add_manual_capability_evidence_but_worker_is_denied_and_audited() {
+        let harness = harness();
+        let mut resource = super::super::economic::native_resource_profile(
+            "hosted",
+            "mock",
+            "Hosted",
+            super::super::economic::BillingMode::SubscriptionQuota,
+        );
+        resource.status = "AVAILABLE".into();
+        harness
+            .service
+            .store
+            .upsert_intelligence_resource(&resource)
+            .unwrap();
+        let denied = harness
+            .service
+            .record_manual_capability(ManualCapabilityEdit {
+                actor: Actor {
+                    id: "worker".into(),
+                    scope: AuthorityScope::Project,
+                },
+                resource_id: "hosted".into(),
+                model: Some("mock".into()),
+                dimension: "coding".into(),
+                score: 80,
+                note: None,
+            });
+        assert!(denied.is_err());
+        let updated = harness
+            .service
+            .record_manual_capability(ManualCapabilityEdit {
+                actor: Actor {
+                    id: "god".into(),
+                    scope: AuthorityScope::Project,
+                },
+                resource_id: "hosted".into(),
+                model: Some("mock".into()),
+                dimension: "coding".into(),
+                score: 80,
+                note: Some("Observed external evaluation".into()),
+            })
+            .unwrap();
+        assert_eq!(updated.capability_evidence.len(), 1);
+        assert_eq!(
+            updated.capability_evidence[0].source,
+            super::super::economic::CapabilityEvidenceSource::Manual
+        );
+        let audit: Vec<AuditRecord> = harness.service.store.list_governance_audit(10).unwrap();
+        assert!(audit
+            .iter()
+            .any(|record| record.action == "MANUAL_CAPABILITY_EVIDENCE"));
+    }
+
+    #[test]
+    fn terms_acknowledgement_is_god_only_and_does_not_make_a_resource_eligible() {
+        let harness = harness();
+        let mut resource = super::super::economic::native_resource_profile(
+            "zai-plan",
+            "zai",
+            "Z.AI Coding Plan",
+            super::super::economic::BillingMode::SubscriptionQuota,
+        );
+        resource.terms.allowed_use_mode = super::super::economic::TermsState::RequiresReview;
+        harness
+            .service
+            .store
+            .upsert_intelligence_resource(&resource)
+            .unwrap();
+
+        assert!(harness
+            .service
+            .acknowledge_resource_terms(
+                "zai-plan",
+                Actor {
+                    id: "worker".into(),
+                    scope: AuthorityScope::Project,
+                },
+            )
+            .is_err());
+        let updated = harness
+            .service
+            .acknowledge_resource_terms(
+                "zai-plan",
+                Actor {
+                    id: "god".into(),
+                    scope: AuthorityScope::Project,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            updated.terms.allowed_use_mode,
+            super::super::economic::TermsState::RequiresReview
+        );
+        assert_eq!(updated.terms.acknowledged_by.as_deref(), Some("god"));
+        assert!(updated.terms.acknowledged_at.is_some());
+        let audit: Vec<AuditRecord> = harness.service.store.list_governance_audit(10).unwrap();
+        assert!(audit
+            .iter()
+            .any(|record| record.action == "RESOURCE_TERMS_ACKNOWLEDGED"));
     }
 
     #[test]

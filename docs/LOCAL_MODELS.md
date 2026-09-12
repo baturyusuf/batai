@@ -20,6 +20,8 @@ Scoring is deterministic: expected fixture tokens, JSON validity and expected-ou
 
 Dimension scores retain `BATAI_BENCHMARK` evidence, timestamp, suite version, sample count and hardware fingerprint. Unknown architecture, long-context and research scores stay `null` when this short suite does not measure them.
 
+Validated Batai task outcomes are stored separately as `REAL_TASK_HISTORY` rather than rewriting these benchmark observations. Quality evidence may aggregate for the exact model identity, while latency evidence for local execution is filtered by hardware fingerprint. The Resources capability drawer shows both sources, confidence and disagreement. See [Capability Learning](CAPABILITY_LEARNING.md).
+
 Role recommendations reuse the organization function policy. The same model can be a Junior Software Engineer and a Senior Product Analyst. Automatic recommendations stop at L4 Senior; L5+ remains a governance-mediated suggestion.
 
 ## Safety and limitations
@@ -29,4 +31,3 @@ Role recommendations reuse the organization function policy. The same model can 
 - Local monetary API cost is not the same as energy cost. Energy and depreciation are not estimated.
 - The benchmark is a worker-fit check, not a general leaderboard or model certification.
 - Ollama cancellation stops Batai's HTTP stream; the daemon's own layer download behavior remains governed by its official API semantics.
-

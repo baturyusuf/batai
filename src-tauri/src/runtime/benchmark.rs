@@ -281,6 +281,7 @@ fn score_benchmark(
                 dimension: dimension.into(),
                 score,
                 source: CapabilityEvidenceSource::BataiBenchmark,
+                model: Some(model.into()),
                 observed_at: observed_at.clone(),
                 hardware_fingerprint: Some(hardware_fingerprint.into()),
                 sample_count: cases.len() as u32,

@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use super::errors::Result;
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(
@@ -174,6 +174,32 @@ pub fn migrate(connection: &mut Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_routing_task ON routing_decisions(task_id, created_at);
         CREATE TABLE IF NOT EXISTS economic_policy (
+          scope TEXT PRIMARY KEY, policy_json TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        "#,
+    )?;
+    apply(
+        connection,
+        10,
+        r#"
+        CREATE TABLE IF NOT EXISTS task_outcome_evidence (
+          id TEXT PRIMARY KEY, task_id TEXT NOT NULL, task_run_id TEXT NOT NULL,
+          agent_id TEXT NOT NULL, resource_id TEXT NOT NULL, provider TEXT NOT NULL,
+          model TEXT NOT NULL, function TEXT NOT NULL, failure_classification TEXT,
+          evidence_json TEXT NOT NULL, completed_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_outcome_resource
+          ON task_outcome_evidence(resource_id, model, completed_at);
+        CREATE INDEX IF NOT EXISTS idx_outcome_task
+          ON task_outcome_evidence(task_id, agent_id, completed_at);
+        CREATE TABLE IF NOT EXISTS routing_calibration_records (
+          id TEXT PRIMARY KEY, routing_decision_id TEXT NOT NULL,
+          task_id TEXT NOT NULL, resource_id TEXT NOT NULL,
+          record_json TEXT NOT NULL, completed_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_calibration_resource
+          ON routing_calibration_records(resource_id, completed_at);
+        CREATE TABLE IF NOT EXISTS capability_learning_policy (
           scope TEXT PRIMARY KEY, policy_json TEXT NOT NULL, updated_at TEXT NOT NULL
         );
         "#,

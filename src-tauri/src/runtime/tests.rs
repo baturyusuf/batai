@@ -202,6 +202,11 @@ fn economic_resources_policy_and_routing_audit_round_trip_without_credentials() 
         alternatives: vec![],
         candidates: vec![],
         policy,
+        router_version: "economic-router-v2".into(),
+        scoring_policy_version: "test-policy".into(),
+        requirements: Default::default(),
+        shadow_ranking: vec![],
+        resource_snapshot: vec![],
     };
     store.save_routing_decision(&decision).unwrap();
     assert_eq!(
@@ -272,6 +277,17 @@ async fn auto_agent_routes_once_before_provider_session_and_checkpoints_explanat
             .len(),
         1
     );
+    let outcomes = store.list_task_outcomes(Some("mock-local"), 10).unwrap();
+    assert_eq!(outcomes.len(), 1);
+    assert_eq!(
+        outcomes[0].routing_decision_id.as_deref(),
+        store
+            .list_routing_decisions(Some("auto-task"), 1)
+            .unwrap()
+            .first()
+            .map(|decision| decision.id.as_str())
+    );
+    assert_eq!(store.list_routing_calibrations(10).unwrap().len(), 1);
 }
 
 #[test]

@@ -23,7 +23,7 @@ pub enum ResourceTier {
     PremiumPayg,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum BillingMode {
     Local,
@@ -55,9 +55,12 @@ pub struct TermsProfile {
     pub allowed_use_mode: TermsState,
     pub checked_at: Option<String>,
     pub source_url: Option<String>,
+    /// Records that GOD saw the terms warning. This never changes eligibility by itself.
+    pub acknowledged_at: Option<String>,
+    pub acknowledged_by: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum CapabilityEvidenceSource {
     ExternalBenchmark,
@@ -73,6 +76,8 @@ pub struct CapabilityEvidence {
     pub dimension: String,
     pub score: CapabilityScore,
     pub source: CapabilityEvidenceSource,
+    #[serde(default)]
+    pub model: Option<String>,
     pub observed_at: String,
     pub hardware_fingerprint: Option<String>,
     pub sample_count: u32,
@@ -144,6 +149,8 @@ pub struct TaskRequirements {
     pub requires_worktree: bool,
     pub deadline_at: Option<String>,
     pub priority: u8,
+    #[serde(default = "default_taxonomy_version")]
+    pub taxonomy_version: String,
 }
 
 impl Default for TaskRequirements {
@@ -158,6 +165,7 @@ impl Default for TaskRequirements {
             requires_worktree: false,
             deadline_at: None,
             priority: 50,
+            taxonomy_version: default_taxonomy_version(),
         }
     }
 }
@@ -203,6 +211,12 @@ pub struct CandidateDecision {
     pub economic_score: Option<f64>,
     pub availability_score: Option<f64>,
     pub total_score: Option<f64>,
+    #[serde(default)]
+    pub capability_confidence: Option<f64>,
+    #[serde(default)]
+    pub conservative_quality_score: Option<f64>,
+    #[serde(default)]
+    pub evidence_disagreement: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -227,6 +241,28 @@ pub struct RoutingDecision {
     pub alternatives: Vec<String>,
     pub candidates: Vec<CandidateDecision>,
     pub policy: EconomicPolicy,
+    #[serde(default = "default_router_version")]
+    pub router_version: String,
+    #[serde(default = "default_scoring_policy_version")]
+    pub scoring_policy_version: String,
+    #[serde(default)]
+    pub requirements: TaskRequirements,
+    #[serde(default)]
+    pub shadow_ranking: Vec<String>,
+    #[serde(default)]
+    pub resource_snapshot: Vec<ResourceProfile>,
+}
+
+fn default_router_version() -> String {
+    "economic-router-v2".into()
+}
+
+fn default_scoring_policy_version() -> String {
+    "economic-policy-v2-confidence-aware".into()
+}
+
+fn default_taxonomy_version() -> String {
+    super::learning::TASK_TAXONOMY_VERSION.into()
 }
 
 #[derive(Debug, Default, Clone)]
@@ -241,6 +277,53 @@ impl QuotaAwareEconomicRouter {
         policy: &EconomicPolicy,
         now: DateTime<Utc>,
     ) -> RoutingDecision {
+        self.route_with_evidence(
+            task_id,
+            requirements,
+            resources,
+            policy,
+            &[],
+            &super::learning::CapabilityLearningPolicy::default(),
+            now,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn route_with_evidence(
+        &self,
+        task_id: &str,
+        requirements: &TaskRequirements,
+        resources: &[ResourceProfile],
+        policy: &EconomicPolicy,
+        outcomes: &[super::learning::TaskOutcomeEvidence],
+        learning_policy: &super::learning::CapabilityLearningPolicy,
+        now: DateTime<Utc>,
+    ) -> RoutingDecision {
+        let calibrations = resources
+            .iter()
+            .flat_map(|resource| {
+                let models = if resource.supported_models.is_empty() {
+                    vec![None]
+                } else {
+                    resource
+                        .supported_models
+                        .iter()
+                        .map(|model| Some(model.clone()))
+                        .collect()
+                };
+                models.into_iter().map(|model| {
+                    let profile = super::learning::CapabilityLearner.calibrate_model(
+                        resource,
+                        model.as_deref(),
+                        outcomes,
+                        learning_policy,
+                        now,
+                    );
+                    ((resource.id.clone(), model), profile)
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        let calibration_index = &calibrations;
         let mut decisions = resources
             .iter()
             .flat_map(|resource| {
@@ -254,7 +337,16 @@ impl QuotaAwareEconomicRouter {
                         .collect()
                 };
                 models.into_iter().map(move |model| {
-                    evaluate_candidate(resource, model, requirements, policy, now)
+                    let calibration = calibration_index.get(&(resource.id.clone(), model.clone()));
+                    evaluate_candidate(
+                        resource,
+                        model,
+                        requirements,
+                        policy,
+                        calibration,
+                        learning_policy,
+                        now,
+                    )
                 })
             })
             .collect::<Vec<_>>();
@@ -281,6 +373,18 @@ impl QuotaAwareEconomicRouter {
                     selected.quality_score.unwrap_or_default()
                 )];
                 reasons.push(economic_reason(resource, now));
+                if let Some(confidence) = selected.capability_confidence {
+                    reasons.push(format!(
+                        "Capability confidence is {} ({confidence:.2}) from retained evidence",
+                        super::learning::confidence_band(confidence).label()
+                    ));
+                }
+                if selected.evidence_disagreement {
+                    reasons.push(
+                    "Benchmark and real-task evidence disagree; conservative capability was used"
+                        .into(),
+                );
+                }
                 if resource.billing_mode == BillingMode::SubscriptionQuota
                     && resource.quota.reset_at.is_some()
                 {
@@ -337,6 +441,17 @@ impl QuotaAwareEconomicRouter {
                 )
             };
 
+        let shadow_ranking = decisions
+            .iter()
+            .filter(|candidate| candidate.eligible && candidate.sufficient)
+            .map(|candidate| {
+                format!(
+                    "{}:{}",
+                    candidate.resource_id,
+                    candidate.model.as_deref().unwrap_or("provider-managed")
+                )
+            })
+            .collect();
         RoutingDecision {
             id: format!("ROUTE-{}", uuid::Uuid::new_v4()),
             task_id: task_id.into(),
@@ -350,6 +465,35 @@ impl QuotaAwareEconomicRouter {
             alternatives,
             candidates: decisions,
             policy: policy.clone(),
+            router_version: default_router_version(),
+            scoring_policy_version: default_scoring_policy_version(),
+            requirements: requirements.clone(),
+            shadow_ranking,
+            resource_snapshot: resources.to_vec(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn test_fixture(task_id: &str, resource_id: &str) -> RoutingDecision {
+        let resource = native_resource_profile(resource_id, "ollama", "Test", BillingMode::Local);
+        RoutingDecision {
+            id: format!("route-{task_id}"),
+            task_id: task_id.into(),
+            timestamp: Utc::now().to_rfc3339(),
+            outcome: RoutingOutcome::Selected,
+            selected_resource_id: Some(resource_id.into()),
+            selected_provider: Some("ollama".into()),
+            selected_model: Some("m".into()),
+            reasoning_effort: Some("MEDIUM".into()),
+            reasons: vec![],
+            alternatives: vec![],
+            candidates: vec![],
+            policy: EconomicPolicy::default(),
+            router_version: default_router_version(),
+            scoring_policy_version: default_scoring_policy_version(),
+            requirements: TaskRequirements::default(),
+            shadow_ranking: vec![],
+            resource_snapshot: vec![resource],
         }
     }
 }
@@ -359,6 +503,8 @@ fn evaluate_candidate(
     model: Option<String>,
     requirements: &TaskRequirements,
     policy: &EconomicPolicy,
+    calibration: Option<&super::learning::CalibratedCapabilityProfile>,
+    learning_policy: &super::learning::CapabilityLearningPolicy,
     now: DateTime<Utc>,
 ) -> CandidateDecision {
     let mut rejected = Vec::new();
@@ -422,14 +568,38 @@ fn evaluate_candidate(
         rejected.push("quota exhausted".into());
     }
 
-    let quality = quality_score(&resource.capabilities, requirements);
+    let routing_profile = calibration
+        .map(|calibration| calibration.routing_profile(&resource.capabilities))
+        .unwrap_or_else(|| resource.capabilities.clone());
+    let quality = quality_score(&routing_profile, requirements);
+    let capability_confidence =
+        calibration.and_then(|calibration| calibration.minimum_confidence_for(requirements));
+    let evidence_disagreement = calibration.is_some_and(|calibration| {
+        super::learning::relevant_dimensions(
+            requirements.function,
+            &requirements.required_capabilities,
+            false,
+        )
+        .iter()
+        .any(|dimension| {
+            calibration
+                .dimensions
+                .get(dimension)
+                .is_some_and(|value| value.disagreement)
+        })
+    });
+    if matches!(requirements.risk, TaskRisk::High | TaskRisk::Critical)
+        && capability_confidence.unwrap_or(0.0) < learning_policy.high_risk_min_confidence
+    {
+        rejected.push("capability confidence too low for high-risk task".into());
+    }
     let threshold = required_quality(requirements, policy);
     let dimensions_sufficient =
         requirements
             .required_capabilities
             .iter()
             .all(|(dimension, minimum)| {
-                capability(&resource.capabilities, dimension).is_some_and(|score| {
+                capability(&routing_profile, dimension).is_some_and(|score| {
                     score >= minimum.saturating_add(policy.min_capability_margin)
                 })
             });
@@ -461,6 +631,21 @@ fn evaluate_candidate(
         economic_score: economic,
         availability_score: availability,
         total_score: total,
+        capability_confidence,
+        conservative_quality_score: quality,
+        evidence_disagreement,
+    }
+}
+
+impl super::learning::ConfidenceBand {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::VeryLow => "VERY_LOW",
+            Self::Low => "LOW",
+            Self::Medium => "MEDIUM",
+            Self::High => "HIGH",
+            Self::VeryHigh => "VERY_HIGH",
+        }
     }
 }
 
@@ -683,6 +868,53 @@ pub fn native_resource_profile(
 mod tests {
     use super::*;
 
+    fn outcome(
+        id: &str,
+        resource_id: &str,
+        model: &str,
+        complexity: u8,
+        quality: super::super::learning::OutcomeQuality,
+    ) -> super::super::learning::TaskOutcomeEvidence {
+        super::super::learning::TaskOutcomeEvidence {
+            id: id.into(),
+            task_id: id.into(),
+            task_run_id: format!("{id}:a:1"),
+            agent_id: "a".into(),
+            resource_id: resource_id.into(),
+            provider: resource_id.into(),
+            model: model.into(),
+            model_identity_mutable: false,
+            hardware_fingerprint: None,
+            function: AgentFunction::BackendEngineering,
+            complexity,
+            risk: TaskRisk::Medium,
+            required_capabilities: BTreeMap::new(),
+            taxonomy_version: super::super::learning::TASK_TAXONOMY_VERSION.into(),
+            selected_reasoning_effort: Some("MEDIUM".into()),
+            started_at: None,
+            completed_at: Utc::now().to_rfc3339(),
+            succeeded: !matches!(quality, super::super::learning::OutcomeQuality::Negative),
+            outcome_quality: quality,
+            failure_classification: matches!(
+                quality,
+                super::super::learning::OutcomeQuality::Negative
+            )
+            .then_some(super::super::learning::FailureClassification::ModelQuality),
+            retries: 0,
+            retry_classification: None,
+            review_outcome: None,
+            review_evidence_kind: super::super::learning::ReviewEvidenceKind::None,
+            tests: Default::default(),
+            changed_files_count: Some(1),
+            duration_ms: Some(100),
+            input_tokens: None,
+            output_tokens: None,
+            provider_reported_cost: None,
+            currency: None,
+            routing_decision_id: None,
+        }
+    }
+
     fn profile(coding: u8, planning: u8) -> CapabilityProfile {
         CapabilityProfile {
             coding: Some(CapabilityScore::new(coding).unwrap()),
@@ -903,5 +1135,102 @@ mod tests {
             EconomicPolicy::default(),
         );
         assert_eq!(decision.outcome, RoutingOutcome::NoSuitableResource);
+    }
+
+    #[test]
+    fn confidence_aware_history_can_reject_weak_local_and_allow_validated_local() {
+        let local = resource("local", BillingMode::Local, 82);
+        let subscription = resource("subscription", BillingMode::SubscriptionQuota, 88);
+        let bad = (0..16)
+            .map(|index| {
+                outcome(
+                    &format!("bad-{index}"),
+                    "local",
+                    "local-model",
+                    70,
+                    super::super::learning::OutcomeQuality::Negative,
+                )
+            })
+            .collect::<Vec<_>>();
+        let requirements = TaskRequirements {
+            function: AgentFunction::BackendEngineering,
+            complexity: 65,
+            ..Default::default()
+        };
+        let decision = QuotaAwareEconomicRouter.route_with_evidence(
+            "bad-history",
+            &requirements,
+            &[local.clone(), subscription.clone()],
+            &EconomicPolicy::default(),
+            &bad,
+            &super::super::learning::CapabilityLearningPolicy::default(),
+            Utc::now(),
+        );
+        assert_eq!(
+            decision.selected_resource_id.as_deref(),
+            Some("subscription")
+        );
+        let good = (0..20)
+            .map(|index| {
+                outcome(
+                    &format!("good-{index}"),
+                    "local",
+                    "local-model",
+                    72,
+                    super::super::learning::OutcomeQuality::StrongPositive,
+                )
+            })
+            .collect::<Vec<_>>();
+        let decision = QuotaAwareEconomicRouter.route_with_evidence(
+            "good-history",
+            &requirements,
+            &[local, subscription],
+            &EconomicPolicy::default(),
+            &good,
+            &super::super::learning::CapabilityLearningPolicy::default(),
+            Utc::now(),
+        );
+        assert_eq!(decision.selected_resource_id.as_deref(), Some("local"));
+        assert!(
+            decision
+                .candidates
+                .iter()
+                .find(|candidate| candidate.resource_id == "local")
+                .unwrap()
+                .capability_confidence
+                .unwrap()
+                >= 0.65
+        );
+    }
+
+    #[test]
+    fn high_risk_task_rejects_sparse_uncertain_capability() {
+        let local = resource("local", BillingMode::Local, 95);
+        let sparse = vec![outcome(
+            "one",
+            "local",
+            "local-model",
+            90,
+            super::super::learning::OutcomeQuality::StrongPositive,
+        )];
+        let decision = QuotaAwareEconomicRouter.route_with_evidence(
+            "high-risk",
+            &TaskRequirements {
+                function: AgentFunction::BackendEngineering,
+                complexity: 75,
+                risk: TaskRisk::High,
+                ..Default::default()
+            },
+            &[local],
+            &EconomicPolicy::default(),
+            &sparse,
+            &super::super::learning::CapabilityLearningPolicy::default(),
+            Utc::now(),
+        );
+        assert_eq!(decision.outcome, RoutingOutcome::NoSuitableResource);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("confidence")));
     }
 }

@@ -19,7 +19,11 @@ use super::{
     },
     errors::{Result, RuntimeError},
     events::EventEngine,
-    execution_provider::provider_failure,
+    execution_provider::{provider_failure, ProviderFailure, UsageSnapshot},
+    learning::{
+        calibration_record, FailureClassification, OutcomeQuality, RetryClassification,
+        ReviewEvidenceKind, TaskOutcomeEvidence, TestEvidence, TASK_TAXONOMY_VERSION,
+    },
     organization::AgentLifecycle,
     recovery::{agent_db_entity, RecoveryEngine},
     sessions::SessionManager,
@@ -357,24 +361,7 @@ impl TaskEngine {
                 Some("CRITICAL") => TaskRisk::Critical,
                 _ => TaskRisk::Medium,
             };
-            let requirements = TaskRequirements {
-                function,
-                complexity,
-                risk,
-                context_tokens: task
-                    .extra
-                    .get("context_tokens")
-                    .and_then(serde_json::Value::as_u64),
-                requires_tools: function.is_coding(),
-                requires_worktree: function.is_coding(),
-                priority: task
-                    .extra
-                    .get("priority")
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or(50)
-                    .min(100) as u8,
-                ..TaskRequirements::default()
-            };
+            let requirements = task_requirements(&task, function, complexity, risk);
             let mut policy = self
                 .store
                 .economic_policy()
@@ -396,11 +383,15 @@ impl TaskEngine {
                 }
             }
             let resources = self.store.list_intelligence_resources()?;
-            let decision = QuotaAwareEconomicRouter.route(
+            let outcome_evidence = self.store.list_task_outcomes(None, 10_000)?;
+            let learning_policy = self.store.capability_learning_policy()?;
+            let decision = QuotaAwareEconomicRouter.route_with_evidence(
                 &task.id,
                 &requirements,
                 &resources,
                 &policy,
+                &outcome_evidence,
+                &learning_policy,
                 chrono::Utc::now(),
             );
             self.store.save_routing_decision(&decision)?;
@@ -584,6 +575,14 @@ impl TaskEngine {
                     )?;
                     self.agents
                         .transition(&agent_id, AgentStatus::Ready, None)?;
+                    self.record_task_outcome(
+                        &task,
+                        &agent,
+                        routing_decision.as_ref(),
+                        false,
+                        Some(&ProviderFailure::Cancelled),
+                        None,
+                    )?;
                     return Err(RuntimeError::Cancelled(task.id));
                 }
                 let (ending_head, changed_files) =
@@ -637,6 +636,14 @@ impl TaskEngine {
                     "changed_files":result.get("changed_files"),"completed_at":chrono::Utc::now().to_rfc3339(),
                     "routing_decision":routing_decision.as_ref().map(|decision| serde_json::json!({"id":decision.id,"resource_id":decision.selected_resource_id,"reasons":decision.reasons}))
                 }))?;
+                self.record_task_outcome(
+                    &task,
+                    &agent,
+                    routing_decision.as_ref(),
+                    true,
+                    None,
+                    Some(&result),
+                )?;
                 self.events.publish(EventType::ProviderTurnCompleted, agent_id.clone(), None, Some(task.id.clone()),
                     serde_json::json!({"provider":agent.provider,"session_id":returned_session_id,"turn_id":result.get("turn_id")}))?;
                 self.events.publish(
@@ -676,6 +683,14 @@ impl TaskEngine {
                         Some(task.id.clone()),
                         serde_json::json!({"cancelled":true}),
                     )?;
+                    self.record_task_outcome(
+                        &task,
+                        &agent,
+                        routing_decision.as_ref(),
+                        false,
+                        Some(&ProviderFailure::Cancelled),
+                        None,
+                    )?;
                     return Err(RuntimeError::Cancelled(task.id));
                 }
                 if provider_error.leaves_execution_unknown() {
@@ -713,9 +728,17 @@ impl TaskEngine {
                             serde_json::json!({"files":changed_files}),
                         )?;
                     }
+                    self.record_task_outcome(
+                        &task,
+                        &agent,
+                        routing_decision.as_ref(),
+                        false,
+                        Some(&provider_error),
+                        None,
+                    )?;
                     return Err(RuntimeError::UnknownAfterCrash(task.id));
                 }
-                let error = provider_failure(provider_error, &agent_id);
+                let error = provider_failure(provider_error.clone(), &agent_id);
                 match &error {
                     RuntimeError::ResourceUnavailable {
                         status, reset_at, ..
@@ -777,9 +800,186 @@ impl TaskEngine {
                             .transition(&agent_id, AgentStatus::Ready, None)?;
                     }
                 }
+                self.record_task_outcome(
+                    &task,
+                    &agent,
+                    routing_decision.as_ref(),
+                    false,
+                    Some(&provider_error),
+                    None,
+                )?;
                 Err(error)
             }
         }
+    }
+
+    fn record_task_outcome(
+        &self,
+        task: &Task,
+        agent: &super::types::Agent,
+        decision: Option<&super::economic::RoutingDecision>,
+        succeeded: bool,
+        failure: Option<&ProviderFailure>,
+        result: Option<&serde_json::Value>,
+    ) -> Result<()> {
+        let run = self
+            .store
+            .get_task_run(&task.id, &agent.id)?
+            .ok_or_else(|| RuntimeError::Provider("task outcome has no task run".into()))?;
+        let resource_id = decision
+            .and_then(|decision| decision.selected_resource_id.clone())
+            .or_else(|| {
+                self.store
+                    .list_intelligence_resources()
+                    .ok()?
+                    .into_iter()
+                    .find(|resource| {
+                        resource.provider.eq_ignore_ascii_case(&agent.provider)
+                            && (resource.supported_models.is_empty()
+                                || resource.supported_models.contains(&agent.model))
+                    })
+                    .map(|resource| resource.id)
+            })
+            .unwrap_or_else(|| format!("explicit:{}", agent.provider));
+        let function = agent
+            .with_backfilled_organization()
+            .function
+            .unwrap_or(super::organization::AgentFunction::GenericSoftwareAgent);
+        let complexity = task
+            .extra
+            .get("complexity")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(50)
+            .min(100) as u8;
+        let risk = parse_task_risk(task);
+        let requirements = decision
+            .map(|decision| decision.requirements.clone())
+            .unwrap_or_else(|| task_requirements(task, function, complexity, risk));
+        let usage = result
+            .and_then(|value| value.get("usage"))
+            .and_then(|value| serde_json::from_value::<UsageSnapshot>(value.clone()).ok())
+            .unwrap_or_default();
+        let tests = result.and_then(parse_test_evidence).unwrap_or_default();
+        let changed_files_count = result
+            .and_then(|value| value.get("changed_files"))
+            .and_then(serde_json::Value::as_array)
+            .map(|files| files.len().min(u32::MAX as usize) as u32);
+        let completed_at = result
+            .and_then(|value| value.get("completed_at"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+        let duration_ms = run
+            .started_at
+            .as_deref()
+            .and_then(|started| chrono::DateTime::parse_from_rfc3339(started).ok())
+            .and_then(|started| {
+                chrono::DateTime::parse_from_rfc3339(&completed_at)
+                    .ok()
+                    .map(|completed| (completed - started).num_milliseconds().max(0) as u64)
+            });
+        let failure_classification = failure.map(classify_failure);
+        let outcome_quality = if succeeded {
+            if tests.all_passed() || changed_files_count.is_some_and(|count| count > 0) {
+                OutcomeQuality::MediumPositive
+            } else {
+                OutcomeQuality::WeakPositive
+            }
+        } else if failure_classification.is_some_and(FailureClassification::affects_capability) {
+            OutcomeQuality::Negative
+        } else {
+            OutcomeQuality::NotQualityEvidence
+        };
+        let model = result
+            .and_then(|value| value.get("model"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(&agent.model)
+            .to_owned();
+        let evidence = TaskOutcomeEvidence {
+            id: format!("OUTCOME-{}-{}-{}", task.id, agent.id, run.attempt),
+            task_id: task.id.clone(),
+            task_run_id: format!("{}:{}:{}", task.id, agent.id, run.attempt),
+            agent_id: agent.id.clone(),
+            resource_id,
+            provider: agent.provider.clone(),
+            model: model.clone(),
+            model_identity_mutable: model.is_empty()
+                || model.eq_ignore_ascii_case("latest")
+                || model.to_ascii_lowercase().ends_with(":latest"),
+            hardware_fingerprint: agent
+                .provider
+                .eq_ignore_ascii_case("ollama")
+                .then(|| super::hardware::HardwareProfiler.detect().fingerprint),
+            function,
+            complexity,
+            risk,
+            required_capabilities: requirements.required_capabilities.clone(),
+            taxonomy_version: requirements.taxonomy_version.clone(),
+            selected_reasoning_effort: decision
+                .and_then(|decision| decision.reasoning_effort.clone())
+                .or_else(|| Some(agent.reasoning_effort.clone())),
+            started_at: run.started_at,
+            completed_at,
+            succeeded,
+            outcome_quality,
+            failure_classification,
+            retries: run.attempt.saturating_sub(1).min(i64::from(u32::MAX)) as u32,
+            retry_classification: (run.attempt > 1).then_some(match failure_classification {
+                Some(FailureClassification::ModelQuality) => RetryClassification::Quality,
+                Some(
+                    FailureClassification::Infrastructure | FailureClassification::ProviderFailure,
+                ) => RetryClassification::Infrastructure,
+                _ => RetryClassification::Unknown,
+            }),
+            review_outcome: None,
+            review_evidence_kind: ReviewEvidenceKind::None,
+            tests,
+            changed_files_count,
+            duration_ms,
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            provider_reported_cost: usage.cost,
+            currency: usage.currency,
+            routing_decision_id: decision.map(|decision| decision.id.clone()),
+        };
+        self.store.save_task_outcome(&evidence)?;
+        if let Some(decision) = decision {
+            let resources = self.store.list_intelligence_resources()?;
+            let outcomes = self
+                .store
+                .list_task_outcomes(Some(&evidence.resource_id), 10_000)?;
+            let learning_policy = self.store.capability_learning_policy()?;
+            let calibrated = resources
+                .iter()
+                .find(|resource| resource.id == evidence.resource_id)
+                .map(|resource| {
+                    super::learning::CapabilityLearner.calibrate_model(
+                        resource,
+                        Some(&evidence.model),
+                        &outcomes,
+                        &learning_policy,
+                        chrono::Utc::now(),
+                    )
+                });
+            if let Some(record) = calibration_record(decision, &evidence, calibrated.as_ref()) {
+                self.store.save_routing_calibration(&record)?;
+                self.events.publish(
+                    EventType::RouterCalibrationUpdated,
+                    "batai",
+                    Some(agent.id.clone()),
+                    Some(task.id.clone()),
+                    serde_json::to_value(record)?,
+                )?;
+            }
+        }
+        self.events.publish(
+            EventType::TaskOutcomeEvidenceRecorded,
+            "batai",
+            Some(agent.id.clone()),
+            Some(task.id.clone()),
+            serde_json::json!({"evidenceId":evidence.id,"resourceId":evidence.resource_id,"quality":evidence.outcome_quality}),
+        )?;
+        Ok(())
     }
 
     pub async fn cancel(self: &Arc<Self>, task_id: &str, requested_by: &str) -> Result<Task> {
@@ -1092,6 +1292,95 @@ impl TaskEngine {
         self.store
             .get_task(id)?
             .ok_or_else(|| RuntimeError::TaskNotFound(id.into()))
+    }
+}
+
+fn parse_task_risk(task: &Task) -> TaskRisk {
+    match task
+        .extra
+        .get("risk")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_ascii_uppercase)
+        .as_deref()
+    {
+        Some("LOW") => TaskRisk::Low,
+        Some("HIGH") => TaskRisk::High,
+        Some("CRITICAL") => TaskRisk::Critical,
+        _ => TaskRisk::Medium,
+    }
+}
+
+fn task_requirements(
+    task: &Task,
+    function: super::organization::AgentFunction,
+    complexity: u8,
+    risk: TaskRisk,
+) -> TaskRequirements {
+    let required_capabilities = task
+        .extra
+        .get("required_capabilities")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default();
+    TaskRequirements {
+        function,
+        complexity,
+        risk,
+        context_tokens: task
+            .extra
+            .get("context_tokens")
+            .and_then(serde_json::Value::as_u64),
+        required_capabilities,
+        requires_tools: function.is_coding(),
+        requires_worktree: function.is_coding(),
+        priority: task
+            .extra
+            .get("priority")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(50)
+            .min(100) as u8,
+        taxonomy_version: task
+            .extra
+            .get("taxonomy_version")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(TASK_TAXONOMY_VERSION)
+            .to_owned(),
+        ..TaskRequirements::default()
+    }
+}
+
+fn parse_test_evidence(result: &serde_json::Value) -> Option<TestEvidence> {
+    let tests = result
+        .get("tests")
+        .or_else(|| result.pointer("/provider_metadata/tests"))?;
+    Some(TestEvidence {
+        total: tests
+            .get("total")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.min(u64::from(u32::MAX)) as u32),
+        passed: tests
+            .get("passed")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.min(u64::from(u32::MAX)) as u32),
+        failed: tests
+            .get("failed")
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.min(u64::from(u32::MAX)) as u32),
+    })
+}
+
+fn classify_failure(failure: &ProviderFailure) -> FailureClassification {
+    match failure {
+        ProviderFailure::RateLimited { .. } => FailureClassification::RateLimit,
+        ProviderFailure::AuthRequired => FailureClassification::Auth,
+        ProviderFailure::Offline
+        | ProviderFailure::Timeout
+        | ProviderFailure::ProcessCrash { .. }
+        | ProviderFailure::AppServerUnavailable(_) => FailureClassification::Infrastructure,
+        ProviderFailure::Cancelled => FailureClassification::UserCancelled,
+        ProviderFailure::MalformedResponse(_) | ProviderFailure::UnsupportedVersion(_) => {
+            FailureClassification::ProviderFailure
+        }
+        ProviderFailure::Execution(_) => FailureClassification::ModelQuality,
     }
 }
 

@@ -7,6 +7,7 @@ pub mod events;
 pub mod execution_provider;
 pub mod governance;
 pub mod hardware;
+pub mod learning;
 pub mod migrations;
 pub mod organization;
 pub mod recovery;
@@ -557,6 +558,56 @@ impl BataiRuntime {
                 profile.usage.currency = summary.usage.currency.clone();
             }
         }
+        let task_outcomes = self.store.list_task_outcomes(None, 2_000)?;
+        let learning_policy = self.store.capability_learning_policy()?;
+        let calibrated_capabilities = intelligence_resources
+            .iter()
+            .flat_map(|resource| {
+                let models = if resource.supported_models.is_empty() {
+                    vec![None]
+                } else {
+                    resource
+                        .supported_models
+                        .iter()
+                        .map(|model| Some(model.as_str()))
+                        .collect()
+                };
+                models.into_iter().map(|model| {
+                    learning::CapabilityLearner.calibrate_model(
+                        resource,
+                        model,
+                        &task_outcomes,
+                        &learning_policy,
+                        chrono::Utc::now(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        let routing_decisions = self.store.list_routing_decisions(None, 250)?;
+        let routing_calibrations = self.store.list_routing_calibrations(2_000)?;
+        let calibration_dashboard =
+            learning::calibration_dashboard(&routing_decisions, &routing_calibrations);
+        let calibration_suggestions = learning::calibration_suggestions(
+            &routing_calibrations,
+            &self.store.economic_policy()?,
+        );
+        let promotion_suggestions = agents
+            .iter()
+            .filter_map(|agent| {
+                let seniority = match agent.seniority.as_deref()? {
+                    "INTERN" => organization::Seniority::Intern,
+                    "JUNIOR" => organization::Seniority::Junior,
+                    "ASSOCIATE" => organization::Seniority::Associate,
+                    "MID" => organization::Seniority::Mid,
+                    "SENIOR" => organization::Seniority::Senior,
+                    "STAFF" => organization::Seniority::Staff,
+                    "PRINCIPAL" => organization::Seniority::Principal,
+                    "DIRECTOR" => organization::Seniority::Director,
+                    _ => return None,
+                };
+                learning::promotion_suggestion(&agent.id, seniority, &task_outcomes)
+            })
+            .collect();
         Ok(AppSnapshot {
             god: GodView {
                 id: "god".into(),
@@ -582,7 +633,14 @@ impl BataiRuntime {
             local_models,
             intelligence_resources,
             economic_policy: self.store.economic_policy()?,
-            routing_decisions: self.store.list_routing_decisions(None, 50)?,
+            routing_decisions,
+            task_outcomes,
+            calibrated_capabilities,
+            routing_calibrations,
+            calibration_dashboard,
+            calibration_suggestions,
+            promotion_suggestions,
+            capability_learning_policy: learning_policy,
         })
     }
 }

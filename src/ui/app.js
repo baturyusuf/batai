@@ -1,5 +1,5 @@
 import {buildGraph, preservedSelection, searchableText, statusGroup} from './organization-graph.js';
-import {formatBytes,routingSummary} from './economic-ui.js';
+import {CAPABILITY_DIMENSIONS,calibrationPercent,capabilityEvidenceRows,confidenceLabel,formatBytes,replaySummary,routingSummary} from './economic-ui.js';
 import {
   FUNCTIONS, SENIORITIES, conflictMessage, createMutationRequest, openCount,
   relationshipIsEditable, validFunctionsForSeniority
@@ -23,6 +23,7 @@ let refreshTimer;
 let inspectorTab = 'overview';
 let organizationEditMode = false;
 let confirmOperation = null;
+let capabilityResourceId = null;
 const graphState = {
   mode:'hierarchy', scale:1, tx:0, ty:20, selectedId:null, query:'', fitted:false,
   filters:{departments:[],seniorities:[],statuses:[],providers:[]}
@@ -128,6 +129,11 @@ function renderResources() {
   const connectionById = new Map(providers.map(provider => [provider.id, provider]));
   const resources = snapshot.intelligenceResources?.length ? snapshot.intelligenceResources : (snapshot.resources ?? []).map(resource => ({id:resource.provider,displayName:label(resource.provider),provider:resource.provider,billingMode:'UNKNOWN',status:resource.status,quota:{usedPercent:resource.usedPercent,resetAt:resource.resetAt},usage:{inputTokens:resource.usage?.inputTokens,outputTokens:resource.usage?.outputTokens,knownCost:resource.usage?.cost,currency:resource.usage?.currency},terms:{}}));
   const hardware = snapshot.hardware;
+  const calibratedByResource = new Map();
+  for (const profile of snapshot.calibratedCapabilities ?? []) {
+    if (!calibratedByResource.has(profile.resourceId)) calibratedByResource.set(profile.resourceId,[]);
+    calibratedByResource.get(profile.resourceId).push(profile);
+  }
   const gpu = hardware?.gpus?.[0];
   $('#hardware-profile').innerHTML = hardware ? `<div><span>CPU</span><strong>${esc(valueOrDash(hardware.cpu?.name))}</strong><small>${number(hardware.cpu?.physicalCores)} physical · ${number(hardware.cpu?.logicalCores)} logical cores</small></div><div><span>Memory</span><strong>${formatBytes(hardware.memory?.totalBytes)}</strong><small>${formatBytes(hardware.memory?.availableBytes)} currently available</small></div><div><span>GPU</span><strong>${esc(gpu?.name ?? 'No supported GPU detected')}</strong><small>${gpu ? `${formatBytes(gpu.vramTotalBytes)} VRAM · ${formatBytes(gpu.vramAvailableBytes)} free` : 'CPU/RAM fallback is assessed conservatively'}</small></div><div><span>Hardware fingerprint</span><strong class="mono">${esc(hardware.fingerprint?.slice(0,16) ?? '—')}</strong><small>Benchmarks are valid only for this hardware identity</small></div>` : '<p class="empty">Hardware profile unavailable.</p>';
   $('#ollama-state').textContent = label(localAiState?.state ?? 'Unknown');
@@ -142,15 +148,63 @@ function renderResources() {
     const totalTokens = resource.usage?.inputTokens != null && resource.usage?.outputTokens != null ? resource.usage.inputTokens + resource.usage.outputTokens : null;
     const cost = resource.usage?.knownCost == null ? 'Unknown' : `${resource.usage.currency ?? ''} ${Number(resource.usage.knownCost).toFixed(4)}`.trim();
     const terms = resource.terms?.allowedUseMode ?? 'UNKNOWN';
-    return `<article class="resource-card"><header><div class="provider-logo">${esc((resource.displayName ?? resource.provider)[0].toUpperCase())}</div><div><strong>${esc(resource.displayName ?? label(resource.provider))}</strong><span>${esc(label(resource.billingMode))}${resource.planName ? ` · ${esc(resource.planName)}` : ''}</span></div><b class="resource-health health-${esc(String(resource.status).toLowerCase())}">${esc(label(connection?.status === 'connected' ? 'AVAILABLE' : resource.status))}</b></header><dl><div><dt>Models</dt><dd>${esc(resource.supportedModels?.length ? resource.supportedModels.join(', ') : 'Provider managed')}</dd></div><div><dt>Active / limit</dt><dd>${number(resource.currentConcurrency)} / ${number(resource.concurrencyLimit)}</dd></div><div><dt>Known tokens</dt><dd>${number(totalTokens)}</dd></div><div><dt>Known marginal cost</dt><dd>${esc(cost)}</dd></div><div><dt>Quota used</dt><dd>${percent(resource.quota?.usedPercent)}</dd></div><div><dt>Reset</dt><dd>${esc(valueOrDash(resource.quota?.resetAt))}</dd></div><div><dt>Use terms</dt><dd>${esc(label(terms))}</dd></div></dl>${connection && ['kimi-personal-membership','zai-coding-plan','minimax-token-plan'].includes(connection.id) ? `<footer><button data-provider="${esc(connection.id)}">${esc(connection.actionLabel)}</button></footer>` : ''}</article>`;
+    const calibratedProfiles=calibratedByResource.get(resource.id) ?? [];
+    const calibrated=calibratedProfiles.slice().sort((a,b)=>(b.observedTasks ?? 0)-(a.observedTasks ?? 0))[0];
+    const observed=calibratedProfiles.reduce((sum,profile)=>sum+(profile.observedTasks ?? 0),0);
+    const confidence=calibratedProfiles.flatMap(capabilityEvidenceRows).sort((a,b)=>b.samples-a.samples)[0];
+    const providerActions=connection && ['kimi-personal-membership','zai-coding-plan','minimax-token-plan'].includes(connection.id) ? `<button data-provider="${esc(connection.id)}">${esc(connection.actionLabel)}</button><button data-test-resource="${esc(resource.id)}">Test connection</button>` : '';
+    const termsAction=terms === 'REQUIRES_REVIEW' && !resource.terms?.acknowledgedAt ? `<button data-acknowledge-terms="${esc(resource.id)}">Acknowledge terms notice</button>` : '';
+    const termsNote=resource.terms?.acknowledgedAt ? ` · warning seen ${esc(resource.terms.acknowledgedAt)}` : '';
+    return `<article class="resource-card"><header><div class="provider-logo">${esc((resource.displayName ?? resource.provider)[0].toUpperCase())}</div><div><strong>${esc(resource.displayName ?? label(resource.provider))}</strong><span>${esc(label(resource.billingMode))}${resource.planName ? ` · ${esc(resource.planName)}` : ''}</span></div><b class="resource-health health-${esc(String(resource.status).toLowerCase())}">${esc(label(connection?.status === 'connected' ? 'AVAILABLE' : resource.status))}</b></header><dl><div><dt>Models</dt><dd>${esc(resource.supportedModels?.length ? resource.supportedModels.join(', ') : 'Provider managed')}</dd></div><div><dt>Observed tasks</dt><dd>${number(observed)}</dd></div><div><dt>Capability confidence</dt><dd>${esc(confidence ? confidenceLabel(confidence) : 'Needs evidence')}</dd></div><div><dt>Quality / service reliability</dt><dd>${calibrationPercent(calibrated?.qualityReliability)} / ${calibrationPercent(calibrated?.serviceReliability)}</dd></div><div><dt>Median latency</dt><dd>${calibrated?.medianLatencyMs == null ? '—' : `${number(calibrated.medianLatencyMs)} ms`}</dd></div><div><dt>Active / limit</dt><dd>${number(resource.currentConcurrency)} / ${number(resource.concurrencyLimit)}</dd></div><div><dt>Known tokens</dt><dd>${number(totalTokens)}</dd></div><div><dt>Known marginal cost</dt><dd>${esc(cost)}</dd></div><div><dt>Quota used</dt><dd>${percent(resource.quota?.usedPercent)}</dd></div><div><dt>Reset</dt><dd>${esc(valueOrDash(resource.quota?.resetAt))}</dd></div><div><dt>Use terms</dt><dd>${esc(label(terms))}${termsNote}</dd></div></dl><footer><button data-capability-resource="${esc(resource.id)}">Capability evidence</button>${termsAction}${providerActions}</footer></article>`;
   }).join('') || '<p class="empty">No runtime resource state has been reported.</p>';
   const bySource = snapshot.project?.usageBySource ?? {};
   $('#economic-summary').innerHTML = ['local','subscription','api'].map(source => `<article><span>${esc(label(source))} inference</span><strong>${number(bySource[source]?.totalTokens)}</strong><small>known tokens</small></article>`).join('') + `<article><span>Known provider spend</span><strong>${snapshot.project?.usage?.cost == null ? '—' : `${esc(snapshot.project.usage.currency ?? '')} ${Number(snapshot.project.usage.cost).toFixed(4)}`}</strong><small>Subscriptions are not converted to fake savings</small></article>`;
-  $('#routing-audit').innerHTML = (snapshot.routingDecisions ?? []).map(decision => `<article><header><strong>${esc(decision.taskId)}</strong><span>${esc(label(decision.outcome))}</span></header><p>${esc(routingSummary(decision))}</p><small>${esc((decision.reasons ?? []).join(' · '))}</small></article>`).join('') || '<p class="empty">No AUTO routing decision has been made yet.</p>';
+  const dashboard=snapshot.calibrationDashboard ?? {};
+  $('#calibration-summary').innerHTML=[['Routed tasks',dashboard.totalRoutedTasks],['Calibrated outcomes',dashboard.calibratedOutcomes],['Sufficiency success',calibrationPercent(dashboard.successRate)],['Under-routing',calibrationPercent(dashboard.underRoutingRate)],['Retry rate',calibrationPercent(dashboard.retryRate)],['Review rejection',calibrationPercent(dashboard.reviewRejectionRate)],['Median latency',dashboard.medianDurationMs == null ? '—' : `${number(dashboard.medianDurationMs)} ms`],['Known spend',dashboard.knownMarginalSpend == null ? '—' : Number(dashboard.knownMarginalSpend).toFixed(4)]].map(([name,value])=>`<div><span>${esc(name)}</span><strong>${esc(valueOrDash(value))}</strong></div>`).join('');
+  $('#calibration-suggestions').innerHTML=(snapshot.calibrationSuggestions ?? []).map(item=>`<article><strong>${esc(label(item.function))} · ${esc(label(item.capability))}</strong><span>${esc(item.reason)}</span><small>${item.currentMargin} → ${item.suggestedMargin} margin · ${number(item.evidenceCount)} outcomes · ${esc(label(item.confidence))} confidence · manual apply</small></article>`).join('') || '<p class="metric-note">No evidence-backed policy change is currently suggested.</p>';
+  const calibrationByDecision=new Map((snapshot.routingCalibrations ?? []).map(record=>[record.routingDecisionId,record]));
+  $('#routing-audit').innerHTML = (snapshot.routingDecisions ?? []).map(decision => { const calibration=calibrationByDecision.get(decision.id); const outcome=calibration?.actualOutcome; return `<article><header><strong>${esc(decision.taskId)}</strong><span>${esc(label(decision.outcome))}</span></header><p>${esc(routingSummary(decision))}</p><dl class="routing-facts"><div><dt>Actual outcome</dt><dd>${esc(label(outcome ?? 'UNKNOWN'))}</dd></div><div><dt>Validation</dt><dd>${esc(label(calibration?.validationStrength ?? 'UNKNOWN'))}</dd></div><div><dt>Latency</dt><dd>${calibration?.latencyMs == null ? '—' : `${number(calibration.latencyMs)} ms`}</dd></div><div><dt>Router</dt><dd>${esc(decision.routerVersion ?? 'legacy')}</dd></div></dl><small>${esc((decision.reasons ?? []).join(' · '))}</small><footer><button data-replay-decision="${esc(decision.id)}">Replay current policy</button></footer></article>`; }).join('') || '<p class="empty">No AUTO routing decision has been made yet.</p>';
   $$('[data-download-model]').forEach(button => button.addEventListener('click', () => downloadModel(button.dataset.downloadModel)));
   $$('[data-cancel-model]').forEach(button => button.addEventListener('click', () => invoke?.('cancel_ollama_pull',{modelId:button.dataset.cancelModel})));
   $$('[data-benchmark-model]').forEach(button => button.addEventListener('click', () => benchmarkModel(button.dataset.benchmarkModel)));
   $$('[data-provider]', $('#resource-summary')).forEach(button => button.addEventListener('click', () => showGuide(button.dataset.provider)));
+  $$('[data-capability-resource]').forEach(button => button.addEventListener('click', () => showCapability(button.dataset.capabilityResource)));
+  $$('[data-test-resource]').forEach(button => button.addEventListener('click', () => testResourceConnection(button)));
+  $$('[data-acknowledge-terms]').forEach(button => button.addEventListener('click', async () => { button.disabled=true; try { await invoke?.('acknowledge_resource_terms',{resourceId:button.dataset.acknowledgeTerms}); await refreshSnapshot(); } catch (error) { window.alert(String(error)); } finally { button.disabled=false; } }));
+  $$('[data-replay-decision]').forEach(button => button.addEventListener('click', () => replayDecision(button.dataset.replayDecision)));
+}
+
+function showCapability(resourceId) {
+  capabilityResourceId=resourceId;
+  const resource=(snapshot.intelligenceResources ?? []).find(item=>item.id===resourceId);
+  const profiles=(snapshot.calibratedCapabilities ?? []).filter(item=>item.resourceId===resourceId);
+  $('#capability-title').textContent=resource?.displayName ?? resourceId;
+  $('#capability-detail').innerHTML=profiles.map(profile=>`<section class="capability-model"><h3>${esc(profile.model ?? 'Provider managed')}</h3>${capabilityEvidenceRows(profile).map(row=>`<article class="capability-row ${row.disagreement ? 'disagreement' : ''}"><header><strong>${esc(label(row.dimension))}</strong><span>${row.score == null ? '—' : Number(row.score).toFixed(1)} · ${esc(confidenceLabel(row))}</span></header><div><span>Routing estimate ${row.routingEstimate == null ? '—' : Number(row.routingEstimate).toFixed(1)}</span><span>${number(row.samples)} real tasks</span></div><small>${row.sources.map(source=>`${label(source.source)} ${source.count}`).join(' · ') || 'No evidence'}${row.disagreement ? ' · Evidence sources disagree' : ''}</small></article>`).join('') || '<p class="empty">No evidence for this model.</p>'}</section>`).join('') || '<p class="empty">No capability evidence yet. Unknown scores remain unknown.</p>';
+  const select=$('#capability-form').elements.dimension;
+  select.innerHTML=CAPABILITY_DIMENSIONS.map(dimension=>`<option value="${dimension}">${esc(label(dimension))}</option>`).join('');
+  const modelSelect=$('#capability-form').elements.model;
+  modelSelect.innerHTML=(resource?.supportedModels?.length ? resource.supportedModels : ['']).map(model=>`<option value="${esc(model)}">${esc(model || 'All provider-managed models')}</option>`).join('');
+  $('#capability-error').textContent='';
+  if (!$('#capability-dialog').open) $('#capability-dialog').showModal();
+}
+
+async function replayDecision(decisionId) {
+  if (!invoke) return;
+  try {
+    const result=await invoke('replay_routing_decision',{decisionId,policy:snapshot.economicPolicy});
+    $('#replay-detail').innerHTML=`<div class="replay-route"><strong>${esc(replaySummary(result))}</strong><span>${result.selectionChanged ? 'Selection changes' : 'Selection stays stable'}</span></div><dl>${inspectorMetric('Original actual outcome',label(result.actualOutcome ?? 'UNKNOWN'))}${inspectorMetric('Alternative outcome','UNKNOWN')}${inspectorMetric('Eligibility changes',(result.eligibilityChanges ?? []).join(', ') || 'None')}${inspectorMetric('Cost class changed',result.costClassChanged ? 'Yes' : 'No')}</dl><p>${esc(result.note)}</p>`;
+    $('#replay-dialog').showModal();
+  } catch(error) { alert(`Replay failed: ${error}`); }
+}
+
+async function testResourceConnection(button) {
+  if (!invoke) return;
+  const resourceId=button.dataset.testResource;
+  const previous=button.textContent;
+  button.disabled=true; button.textContent='Testing…';
+  try { const result=await invoke('test_resource_connection',{resourceId}); button.textContent=label(result.status); button.title=result.detail; }
+  catch(error){ button.textContent='Test failed'; button.title=String(error); }
+  finally { setTimeout(()=>{button.disabled=false;button.textContent=previous;},2500); }
 }
 
 async function refreshLocalAi() { if (!invoke) return; localAiState = await invoke('get_local_ai_state'); renderResources(); }
@@ -197,6 +251,27 @@ function renderPolicy() {
   economicForm.elements.economicAllowPayg.checked = Boolean(economic.allowPayg);
   economicForm.elements.minCapabilityMargin.value = economic.minCapabilityMargin ?? 3;
   economicForm.elements.maxPaygPerTask.value = economic.maxPaygPerTask ?? '';
+  let learningForm=$('#learning-policy-form');
+  if (!learningForm) {
+    $('#view-settings').insertAdjacentHTML('beforeend', `<form id="learning-policy-form" class="panel policy-form economic-policy-form"><div class="policy-heading"><p class="eyebrow">CAPABILITY LEARNING</p><h2>Conservative evidence policy</h2><small>Automatic calibration remains off; Batai produces suggestions for GOD.</small></div><label>Recency half-life <small>Days</small><input name="recencyHalfLifeDays" type="number" min="1" max="3650"></label><label>Low-confidence penalty<input name="lowConfidencePenalty" type="number" min="0" max="40"></label><label>High-risk minimum confidence<input name="highRiskMinConfidence" type="number" min="0" max="1" step="0.05"></label><label>Evidence disagreement threshold<input name="disagreementThreshold" type="number" min="1" max="100"></label><label class="check-row"><input name="automaticCalibration" type="checkbox" disabled> Automatic calibration (off)</label><div class="dialog-actions"><span id="learning-policy-status"></span><button class="primary-button" type="submit">Save learning policy</button></div></form>`);
+    learningForm=$('#learning-policy-form');
+    learningForm.addEventListener('submit',saveLearningPolicy);
+  }
+  const learning=snapshot.capabilityLearningPolicy ?? {};
+  learningForm.elements.recencyHalfLifeDays.value=learning.recencyHalfLifeDays ?? 120;
+  learningForm.elements.lowConfidencePenalty.value=learning.lowConfidencePenalty ?? 14;
+  learningForm.elements.highRiskMinConfidence.value=learning.highRiskMinConfidence ?? .45;
+  learningForm.elements.disagreementThreshold.value=learning.disagreementThreshold ?? 20;
+  learningForm.elements.automaticCalibration.checked=false;
+}
+
+async function saveLearningPolicy(event) {
+  event.preventDefault();
+  if (!invoke) return;
+  const form=event.currentTarget;
+  const policy={...(snapshot.capabilityLearningPolicy ?? {}),recencyHalfLifeDays:Number(form.elements.recencyHalfLifeDays.value),lowConfidencePenalty:Number(form.elements.lowConfidencePenalty.value),highRiskMinConfidence:Number(form.elements.highRiskMinConfidence.value),disagreementThreshold:Number(form.elements.disagreementThreshold.value),automaticCalibration:false};
+  try { await invoke('update_capability_learning_policy',{policy}); snapshot.capabilityLearningPolicy=policy; $('#learning-policy-status').textContent='Saved'; }
+  catch(error){ $('#learning-policy-status').textContent=String(error); }
 }
 
 async function refreshSnapshot() {
@@ -375,6 +450,8 @@ function renderInspector(agent) {
   $('#inspector-tabs').hidden = false;
   $$('#inspector-tabs button').forEach(button => button.classList.toggle('active', button.dataset.tab === inspectorTab));
   const tasks = snapshot.tasks.filter(task => task.assignedTo.includes(agent.id));
+  const latestRouting=(snapshot.routingDecisions ?? []).find(decision=>decision.taskId===agent.currentTaskId || snapshot.taskOutcomes?.some(outcome=>outcome.agentId===agent.id && outcome.routingDecisionId===decision.id));
+  const calibrated=(snapshot.calibratedCapabilities ?? []).find(profile=>profile.resourceId===latestRouting?.selectedResourceId);
   if (inspectorTab === 'tasks') {
     const groups = [['Current',['RUNNING','WAITING_RESOURCE','BLOCKED','REVIEW']],['Queued',['PENDING','READY']],['Completed',['COMPLETED']],['Failed',['FAILED','CANCELLED']]];
     $('#inspector-content').innerHTML = groups.map(([name,statuses]) => `<section class="inspector-section"><h3>${name}</h3>${tasks.filter(task => statuses.includes(task.status)).map(task => `<button class="inspector-task" data-go-task="${esc(task.id)}"><strong>${esc(task.id)}</strong><span>${esc(task.objective)}</span><small>${esc(label(task.status))}</small></button>`).join('') || '<p class="metric-note">No tasks</p>'}</section>`).join('');
@@ -393,7 +470,8 @@ function renderInspector(agent) {
   }
   if (inspectorTab === 'performance') {
     const performance = agent.performance ?? {};
-    $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Observed outcomes</h3><dl>${inspectorMetric('Completed',performance.completedTasks)}${inspectorMetric('Active',performance.activeTasks)}${inspectorMetric('Failures',performance.failedTasks)}${inspectorMetric('First-attempt success',percent(performance.firstAttemptSuccessRate))}${inspectorMetric('Final success',percent(performance.finalSuccessRate))}${inspectorMetric('Average attempts',performance.averageAttempts?.toFixed(1))}${inspectorMetric('Review acceptance',percent(performance.reviewAcceptanceRate))}${inspectorMetric('Average duration',performance.averageTaskDurationSeconds == null ? '—' : `${Math.round(performance.averageTaskDurationSeconds)}s`)}</dl></section><p class="metric-note">Only durable task-run history is counted.</p>`;
+    const promotion=(snapshot.promotionSuggestions ?? []).find(item=>item.agentId===agent.id);
+    $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Observed outcomes</h3><dl>${inspectorMetric('Completed',performance.completedTasks)}${inspectorMetric('Active',performance.activeTasks)}${inspectorMetric('Failures',performance.failedTasks)}${inspectorMetric('First-attempt success',percent(performance.firstAttemptSuccessRate))}${inspectorMetric('Final success',percent(performance.finalSuccessRate))}${inspectorMetric('Average attempts',performance.averageAttempts?.toFixed(1))}${inspectorMetric('Review acceptance',percent(performance.reviewAcceptanceRate))}${inspectorMetric('Average duration',performance.averageTaskDurationSeconds == null ? '—' : `${Math.round(performance.averageTaskDurationSeconds)}s`)}</dl></section><section class="inspector-section"><h3>Effective intelligence evidence</h3><dl>${inspectorMetric('Resource observations',calibrated?.observedTasks)}${inspectorMetric('Quality reliability',calibrationPercent(calibrated?.qualityReliability))}${inspectorMetric('Service reliability',calibrationPercent(calibrated?.serviceReliability))}${inspectorMetric('Median latency',calibrated?.medianLatencyMs == null ? '—' : `${number(calibrated.medianLatencyMs)} ms`)}</dl>${promotion ? `<p class="promotion-suggestion">${esc(label(promotion.currentSeniority))} → ${esc(label(promotion.suggestedSeniority))} candidate · ${number(promotion.validatedTasks)} validated tasks · ${esc(label(promotion.confidence))} confidence. Promotion requires governance.</p>` : '<p class="metric-note">No evidence-backed promotion review suggested.</p>'}</section><p class="metric-note">Capability evidence is conservative and does not automatically change organizational level.</p>`;
     return;
   }
   if (inspectorTab === 'context') {
@@ -410,7 +488,9 @@ function renderTaskInspector(task) {
   $('#inspector-heading').textContent = task.id;
   $('#inspector-tabs').hidden = true;
   const routing=(snapshot.routingDecisions ?? []).find(decision=>decision.taskId===task.id);
-  $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Task</h3><p class="task-objective">${esc(task.objective)}</p><dl>${inspectorMetric('Status',label(task.status))}${inspectorMetric('Owner',(task.assignedTo ?? []).join(', ') || 'Unassigned')}${inspectorMetric('Dependencies',(task.dependencies ?? []).join(', ') || '—')}${inspectorMetric('Weight',task.weight)}</dl></section>${routing ? `<section class="inspector-section"><h3>Intelligence assignment</h3><dl>${inspectorMetric('Resource',routing.selectedResourceId)}${inspectorMetric('Model',routing.selectedModel)}${inspectorMetric('Effort',label(routing.reasoningEffort))}</dl><p class="routing-reason">${esc(routing.reasons?.join(' · '))}</p></section>` : ''}<button class="primary-button" id="open-task-board">Open Task Board</button>`;
+  const calibration=(snapshot.routingCalibrations ?? []).find(record=>record.routingDecisionId===routing?.id);
+  const selectedCandidate=routing?.candidates?.find(candidate=>candidate.resourceId===routing.selectedResourceId && (!routing.selectedModel || candidate.model===routing.selectedModel));
+  $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Task</h3><p class="task-objective">${esc(task.objective)}</p><dl>${inspectorMetric('Status',label(task.status))}${inspectorMetric('Owner',(task.assignedTo ?? []).join(', ') || 'Unassigned')}${inspectorMetric('Dependencies',(task.dependencies ?? []).join(', ') || '—')}${inspectorMetric('Weight',task.weight)}</dl></section>${routing ? `<section class="inspector-section"><h3>Intelligence assignment</h3><dl>${inspectorMetric('Resource',routing.selectedResourceId)}${inspectorMetric('Model',routing.selectedModel)}${inspectorMetric('Effort',label(routing.reasoningEffort))}${inspectorMetric('Conservative capability',selectedCandidate?.conservativeQualityScore == null ? '—' : Number(selectedCandidate.conservativeQualityScore).toFixed(1))}${inspectorMetric('Confidence',selectedCandidate?.capabilityConfidence == null ? 'Unknown' : calibrationPercent(selectedCandidate.capabilityConfidence))}${inspectorMetric('Actual outcome',label(calibration?.actualOutcome ?? 'UNKNOWN'))}</dl><p class="routing-reason">${esc(routing.reasons?.join(' · '))}</p><p class="metric-note">Shadow ranking: ${esc((routing.shadowRanking ?? []).join(' → ') || '—')}. Unselected outcomes remain unknown.</p></section>` : ''}<button class="primary-button" id="open-task-board">Open Task Board</button>`;
   $('#open-task-board').addEventListener('click', () => switchView('tasks'));
 }
 
@@ -651,6 +731,17 @@ $('#toggle-org-edit').addEventListener('click', event => {
 $('#create-agent').addEventListener('click', () => { populateAgentForm(); $('#agent-dialog').showModal(); });
 $('#add-relationship').addEventListener('click', () => { populateRelationshipForm(); $('#relationship-dialog').showModal(); });
 $$('[data-close-dialog]').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
+$('#capability-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!invoke || !capabilityResourceId) return;
+  const form=event.currentTarget;
+  try {
+    await invoke('add_manual_capability_evidence',{resourceId:capabilityResourceId,model:form.elements.model.value || null,dimension:form.elements.dimension.value,score:Number(form.elements.score.value),note:form.elements.note.value || null});
+    form.elements.score.value=''; form.elements.note.value='';
+    await refreshSnapshot();
+    showCapability(capabilityResourceId);
+  } catch(error) { $('#capability-error').textContent=String(error); }
+});
 $('#agent-form').elements.seniority.addEventListener('change', updateFunctionOptions);
 $('#agent-form').elements.assignment.addEventListener('change', event => {
   const automatic = event.target.value === 'AUTO';

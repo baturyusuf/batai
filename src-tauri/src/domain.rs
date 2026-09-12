@@ -6,6 +6,11 @@ use crate::runtime::{
     economic::{EconomicPolicy, ResourceProfile, RoutingDecision},
     execution_provider::UsageSnapshot,
     governance::GovernanceSnapshot,
+    learning::{
+        CalibratedCapabilityProfile, CalibrationDashboard, CalibrationSuggestion,
+        CapabilityLearningPolicy, PromotionSuggestion, RoutingCalibrationRecord,
+        TaskOutcomeEvidence,
+    },
     organization::{CapabilityProfile, OrganizationRelationship},
 };
 
@@ -224,6 +229,20 @@ pub struct AppSnapshot {
     pub economic_policy: EconomicPolicy,
     #[serde(default)]
     pub routing_decisions: Vec<RoutingDecision>,
+    #[serde(default)]
+    pub task_outcomes: Vec<TaskOutcomeEvidence>,
+    #[serde(default)]
+    pub calibrated_capabilities: Vec<CalibratedCapabilityProfile>,
+    #[serde(default)]
+    pub routing_calibrations: Vec<RoutingCalibrationRecord>,
+    #[serde(default)]
+    pub calibration_dashboard: CalibrationDashboard,
+    #[serde(default)]
+    pub calibration_suggestions: Vec<CalibrationSuggestion>,
+    #[serde(default)]
+    pub promotion_suggestions: Vec<PromotionSuggestion>,
+    #[serde(default)]
+    pub capability_learning_policy: CapabilityLearningPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

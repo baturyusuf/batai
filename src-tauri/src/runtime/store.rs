@@ -12,6 +12,7 @@ use super::{
     benchmark::BenchmarkResult,
     economic::{EconomicPolicy, ResourceProfile, RoutingDecision},
     errors::{Result, RuntimeError},
+    learning::{CapabilityLearningPolicy, RoutingCalibrationRecord, TaskOutcomeEvidence},
     migrations,
     recovery::OperationJournal,
     types::{
@@ -135,6 +136,131 @@ impl RuntimeStore {
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(values)
+    }
+
+    pub fn get_routing_decision(&self, id: &str) -> Result<Option<RoutingDecision>> {
+        self.db()?
+            .query_row(
+                "SELECT decision_json FROM routing_decisions WHERE id=?",
+                [id],
+                |row| json_column(row.get::<_, String>(0)?),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn save_task_outcome(&self, evidence: &TaskOutcomeEvidence) -> Result<()> {
+        self.db()?.execute(
+            r#"INSERT INTO task_outcome_evidence
+               (id,task_id,task_run_id,agent_id,resource_id,provider,model,function,failure_classification,evidence_json,completed_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+               failure_classification=excluded.failure_classification,
+               evidence_json=excluded.evidence_json,completed_at=excluded.completed_at"#,
+            params![
+                evidence.id,
+                evidence.task_id,
+                evidence.task_run_id,
+                evidence.agent_id,
+                evidence.resource_id,
+                evidence.provider,
+                evidence.model,
+                serde_json::to_value(evidence.function)?.as_str().unwrap_or("GENERIC_SOFTWARE_AGENT"),
+                evidence
+                    .failure_classification
+                    .map(serde_json::to_value)
+                    .transpose()?
+                    .and_then(|value| value.as_str().map(str::to_owned)),
+                serde_json::to_string(evidence)?,
+                evidence.completed_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_task_outcomes(
+        &self,
+        resource_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<TaskOutcomeEvidence>> {
+        let db = self.db()?;
+        let mut statement = db.prepare(
+            "SELECT evidence_json FROM task_outcome_evidence WHERE (? IS NULL OR resource_id=?) ORDER BY completed_at DESC LIMIT ?",
+        )?;
+        let values = statement
+            .query_map(params![resource_id, resource_id, limit as i64], |row| {
+                json_column(row.get::<_, String>(0)?)
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn task_outcome(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+    ) -> Result<Option<TaskOutcomeEvidence>> {
+        self.db()?
+            .query_row(
+                "SELECT evidence_json FROM task_outcome_evidence WHERE task_id=? AND agent_id=? ORDER BY completed_at DESC LIMIT 1",
+                params![task_id, agent_id],
+                |row| json_column(row.get::<_, String>(0)?),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn save_routing_calibration(&self, record: &RoutingCalibrationRecord) -> Result<()> {
+        self.db()?.execute(
+            r#"INSERT INTO routing_calibration_records
+               (id,routing_decision_id,task_id,resource_id,record_json,completed_at)
+               VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+               record_json=excluded.record_json,completed_at=excluded.completed_at"#,
+            params![
+                record.id,
+                record.routing_decision_id,
+                record.task_id,
+                record.resource_id,
+                serde_json::to_string(record)?,
+                record.completed_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_routing_calibrations(&self, limit: usize) -> Result<Vec<RoutingCalibrationRecord>> {
+        let db = self.db()?;
+        let mut statement = db.prepare(
+            "SELECT record_json FROM routing_calibration_records ORDER BY completed_at DESC LIMIT ?",
+        )?;
+        let values = statement
+            .query_map([limit as i64], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn capability_learning_policy(&self) -> Result<CapabilityLearningPolicy> {
+        let value = self
+            .db()?
+            .query_row(
+                "SELECT policy_json FROM capability_learning_policy WHERE scope='project'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        value
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .unwrap_or_else(|| Ok(CapabilityLearningPolicy::default()))
+    }
+
+    pub fn set_capability_learning_policy(&self, policy: &CapabilityLearningPolicy) -> Result<()> {
+        policy.validate().map_err(RuntimeError::Provider)?;
+        self.db()?.execute(
+            r#"INSERT INTO capability_learning_policy(scope,policy_json,updated_at)
+               VALUES('project',?,?) ON CONFLICT(scope) DO UPDATE SET
+               policy_json=excluded.policy_json,updated_at=excluded.updated_at"#,
+            params![serde_json::to_string(policy)?, now()],
+        )?;
+        Ok(())
     }
 
     pub fn economic_policy(&self) -> Result<EconomicPolicy> {
