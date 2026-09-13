@@ -1,5 +1,6 @@
 import {buildGraph, preservedSelection, searchableText, statusGroup} from './organization-graph.js';
 import {CAPABILITY_DIMENSIONS,calibrationPercent,capabilityEvidenceRows,confidenceLabel,formatBytes,replaySummary,routingSummary} from './economic-ui.js';
+import {deliveryTimeline,nextDeliveryAction} from './delivery-ui.js';
 import {
   FUNCTIONS, SENIORITIES, conflictMessage, createMutationRequest, openCount,
   relationshipIsEditable, validFunctionsForSeniority
@@ -117,6 +118,10 @@ function renderTasks() {
     const tasks = snapshot.tasks.filter(task => statuses.includes(task.status));
     return `<section class="task-column"><header><span>${name}</span><b>${tasks.length}</b></header>${tasks.map(task => `<article class="task-card" data-task-id="${esc(task.id)}"><strong>${esc(task.id)}</strong><p>${esc(task.objective)}</p><footer><span>${esc(label(task.status))}</span><span>${esc(task.assignedTo[0] ?? 'Unassigned')}</span></footer></article>`).join('')}</section>`;
   }).join('');
+  $$('[data-task-id]', $('#task-board')).forEach(card=>card.addEventListener('click',()=>{
+    const task=snapshot.tasks.find(item=>item.id===card.dataset.taskId);
+    if(task){switchView('organization');renderTaskInspector(task);}
+  }));
 }
 
 function renderProviders() {
@@ -216,31 +221,40 @@ function renderGovernance() {
   const decisions = governance.decisions ?? [];
   const approvals = governance.providerApprovals ?? [];
   const recovery = governance.recoveryOperations ?? [];
+  const remoteRecovery = (snapshot.remoteOperations ?? []).filter(operation=>operation.phase === 'NEEDS_REVIEW');
   const open = openCount(decisions);
   $('#organization-revision').textContent = `rev ${governance.revision ?? 0}`;
   $('#decision-count').textContent = `${open} open`;
   $('#decision-count').classList.toggle('has-open', open > 0);
   const navDecision = $('.nav-item[data-view="decisions"]');
-  navDecision?.classList.toggle('attention', open + approvals.filter(item => item.status === 'PENDING_GOD').length + (governance.recoveryRequiresReview ?? 0) > 0);
+  navDecision?.classList.toggle('attention', open + approvals.filter(item => item.status === 'PENDING_GOD').length + (governance.recoveryRequiresReview ?? 0) + remoteRecovery.length > 0);
   $('#decision-list').innerHTML = decisions.map(decision => `<article class="governance-record"><header><strong>${esc(decision.question)}</strong><span class="record-status ${esc(decision.status.toLowerCase())}">${esc(label(decision.status))}</span></header><p>${esc(decision.impact)}</p><small>${esc(decision.requestedBy)} · ${esc(new Date(decision.createdAt).toLocaleString())}</small>${decision.status === 'OPEN' ? `<div class="record-actions"><button class="approve" data-decision="${esc(decision.id)}" data-resolution="approve">Approve exact change</button><button class="reject" data-decision="${esc(decision.id)}" data-resolution="reject">Reject</button></div>` : ''}</article>`).join('') || '<p class="empty">No organizational decisions.</p>';
   $('#approval-list').innerHTML = approvals.map(approval => { const remaining = approval.expiresAt ? Math.max(0, Math.ceil((new Date(approval.expiresAt) - Date.now()) / 1000)) : null; return `<article class="governance-record"><header><strong>${esc(approval.operation)}</strong><span class="record-status ${esc(approval.status.toLowerCase())}">${esc(label(approval.status))}</span></header><p>${esc(label(approval.provider))} · ${esc(approval.agentId ?? 'Unknown agent')} · ${esc(approval.taskId ?? 'No task')}</p><dl class="record-details"><div><dt>Target</dt><dd>${esc(valueOrDash(approval.requestedTarget))}</dd></div><div><dt>Risk</dt><dd>${esc(label(approval.risk ?? 'Unknown'))}</dd></div><div><dt>Thread / turn</dt><dd>${esc(`${approval.threadId ?? '—'} / ${approval.turnId ?? '—'}`)}</dd></div></dl><small>${esc(new Date(approval.createdAt).toLocaleString())}${remaining == null ? '' : ` · expires in ${remaining}s`}</small>${approval.status === 'PENDING_GOD' ? `<div class="record-actions"><button class="approve" data-approval="${esc(approval.id)}" data-resolution="approve">Allow once</button><button class="reject" data-approval="${esc(approval.id)}" data-resolution="reject">Deny</button></div>` : ''}</article>`; }).join('') || '<p class="empty">No provider approval requests.</p>';
-  $('#recovery-count').textContent = `${governance.recoveryRequiresReview ?? 0} review`;
-  $('#recovery-count').classList.toggle('has-open', (governance.recoveryRequiresReview ?? 0) > 0);
-  $('#recovery-list').innerHTML = recovery.map(operation => `<article class="governance-record"><header><strong>${esc(label(operation.operationType))}</strong><span class="record-status ${esc(operation.currentPhase.toLowerCase())}">${esc(label(operation.currentPhase))}</span></header><p>${esc(operation.actor)} · ${esc(valueOrDash(operation.target))}</p><dl class="record-details"><div><dt>Files</dt><dd>${operation.affectedFiles?.length ?? 0}</dd></div><div><dt>Detected state</dt><dd>${esc(label(operation.currentPhase))}</dd></div><div><dt>Recommendation</dt><dd>${esc(label(operation.recoveryDisposition))}</dd></div></dl>${operation.failureDetails ? `<small>${esc(operation.failureDetails)}</small>` : ''}${operation.currentPhase === 'NEEDS_REVIEW' ? `<div class="record-actions"><button data-recovery="${esc(operation.operationId)}" data-recovery-action="RETRY_COMPLETE">Retry / complete</button><button data-recovery="${esc(operation.operationId)}" data-recovery-action="ACCEPT_CURRENT_STATE">Accept current state</button><button class="reject" data-recovery="${esc(operation.operationId)}" data-recovery-action="ROLLBACK">Rollback if safe</button></div>` : ''}</article>`).join('') || '<p class="empty">No recovery operations.</p>';
+  const totalRecovery=(governance.recoveryRequiresReview ?? 0)+remoteRecovery.length;
+  $('#recovery-count').textContent = `${totalRecovery} review`;
+  $('#recovery-count').classList.toggle('has-open', totalRecovery > 0);
+  const localCards=recovery.map(operation => `<article class="governance-record"><header><strong>${esc(label(operation.operationType))}</strong><span class="record-status ${esc(operation.currentPhase.toLowerCase())}">${esc(label(operation.currentPhase))}</span></header><p>${esc(operation.actor)} · ${esc(valueOrDash(operation.target))}</p><dl class="record-details"><div><dt>Files</dt><dd>${operation.affectedFiles?.length ?? 0}</dd></div><div><dt>Detected state</dt><dd>${esc(label(operation.currentPhase))}</dd></div><div><dt>Recommendation</dt><dd>${esc(label(operation.recoveryDisposition))}</dd></div></dl>${operation.failureDetails ? `<small>${esc(operation.failureDetails)}</small>` : ''}${operation.currentPhase === 'NEEDS_REVIEW' ? `<div class="record-actions"><button data-recovery="${esc(operation.operationId)}" data-recovery-action="RETRY_COMPLETE">Retry / complete</button><button data-recovery="${esc(operation.operationId)}" data-recovery-action="ACCEPT_CURRENT_STATE">Accept current state</button><button class="reject" data-recovery="${esc(operation.operationId)}" data-recovery-action="ROLLBACK">Rollback if safe</button></div>` : ''}</article>`).join('');
+  const remoteCards=remoteRecovery.map(operation=>`<article class="governance-record"><header><strong>GitHub · ${esc(label(operation.operationType))}</strong><span class="record-status open">Needs review</span></header><p>${esc(operation.repository)} · ${esc(valueOrDash(operation.target))}</p><dl class="record-details"><div><dt>Task</dt><dd>${esc(operation.taskId)}</dd></div><div><dt>Detected state</dt><dd>Remote result is uncertain</dd></div><div><dt>Recommendation</dt><dd>Inspect remote truth before retrying</dd></div></dl>${operation.failure?`<small>${esc(operation.failure)}</small>`:''}<div class="record-actions"><button data-inspect-delivery-task="${esc(operation.taskId)}">Inspect task</button></div></article>`).join('');
+  $('#recovery-list').innerHTML = localCards+remoteCards || '<p class="empty">No recovery operations.</p>';
   $$('[data-decision]').forEach(button => button.addEventListener('click', () => resolveDecision(button.dataset.decision, button.dataset.resolution === 'approve')));
   $$('[data-approval]').forEach(button => button.addEventListener('click', () => resolveApproval(button.dataset.approval, button.dataset.resolution === 'approve')));
   $$('[data-recovery]').forEach(button => button.addEventListener('click', () => resolveRecovery(button.dataset.recovery, button.dataset.recoveryAction)));
+  $$('[data-inspect-delivery-task]').forEach(button=>button.addEventListener('click',()=>{const task=snapshot.tasks.find(item=>item.id===button.dataset.inspectDeliveryTask);if(task){switchView('organization');renderTaskInspector(task);}}));
   renderPolicy();
 }
 
 function renderPolicy() {
   const policy = snapshot.governance?.policy ?? {};
   const form = $('#policy-form');
+  if (!form.elements.automaticSafeGithubMerge) {
+    form.querySelector('.dialog-actions').insertAdjacentHTML('beforebegin','<label class="check-row"><input name="automaticSafeGithubMerge" type="checkbox"> Allow automatic safe GitHub merge</label>');
+  }
   form.elements.maxActiveAgents.value = policy.limits?.maxActiveAgents ?? 8;
   form.elements.maxHierarchyDepth.value = policy.limits?.maxHierarchyDepth ?? 3;
   form.elements.providerApprovalTimeoutSeconds.value = policy.providerApprovalTimeoutSeconds ?? 300;
   form.elements.allowPayg.checked = Boolean(policy.allowPayg);
   form.elements.autoAgentCreation.checked = Boolean(policy.autoAgentCreation);
+  form.elements.automaticSafeGithubMerge.checked = Boolean(policy.automaticSafeGithubMerge);
   form.elements.allowedProviders.value = (policy.allowedProviders ?? []).join(', ');
   form.elements.deniedProviders.value = (policy.deniedProviders ?? []).join(', ');
   const economic = snapshot.economicPolicy ?? {};
@@ -490,8 +504,32 @@ function renderTaskInspector(task) {
   const routing=(snapshot.routingDecisions ?? []).find(decision=>decision.taskId===task.id);
   const calibration=(snapshot.routingCalibrations ?? []).find(record=>record.routingDecisionId===routing?.id);
   const selectedCandidate=routing?.candidates?.find(candidate=>candidate.resourceId===routing.selectedResourceId && (!routing.selectedModel || candidate.model===routing.selectedModel));
-  $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Task</h3><p class="task-objective">${esc(task.objective)}</p><dl>${inspectorMetric('Status',label(task.status))}${inspectorMetric('Owner',(task.assignedTo ?? []).join(', ') || 'Unassigned')}${inspectorMetric('Dependencies',(task.dependencies ?? []).join(', ') || '—')}${inspectorMetric('Weight',task.weight)}</dl></section>${routing ? `<section class="inspector-section"><h3>Intelligence assignment</h3><dl>${inspectorMetric('Resource',routing.selectedResourceId)}${inspectorMetric('Model',routing.selectedModel)}${inspectorMetric('Effort',label(routing.reasoningEffort))}${inspectorMetric('Conservative capability',selectedCandidate?.conservativeQualityScore == null ? '—' : Number(selectedCandidate.conservativeQualityScore).toFixed(1))}${inspectorMetric('Confidence',selectedCandidate?.capabilityConfidence == null ? 'Unknown' : calibrationPercent(selectedCandidate.capabilityConfidence))}${inspectorMetric('Actual outcome',label(calibration?.actualOutcome ?? 'UNKNOWN'))}</dl><p class="routing-reason">${esc(routing.reasons?.join(' · '))}</p><p class="metric-note">Shadow ranking: ${esc((routing.shadowRanking ?? []).join(' → ') || '—')}. Unselected outcomes remain unknown.</p></section>` : ''}<button class="primary-button" id="open-task-board">Open Task Board</button>`;
+  const delivery=(snapshot.deliveries ?? []).find(item=>item.taskId===task.id);
+  const links=(snapshot.externalLinks ?? []).filter(item=>item.taskId===task.id);
+  const issue=links.find(item=>item.entityType==='ISSUE'); const pr=delivery?.pullRequest;
+  const timeline=deliveryTimeline(delivery).map(item=>`<li class="${esc(item.state)}"><i>${item.state==='complete'?'✓':item.state==='active'?'●':item.state==='blocked'?'!':'○'}</i><span>${esc(label(item.name))}</span></li>`).join('');
+  const action=nextDeliveryAction(delivery,task.assignedTo?.[0]);
+  const actionLabels={prepare:'Prepare worktree',commit:'Commit changes',push:'Push branch','create-pr':'Create pull request',sync:'Refresh GitHub','approve-merge':'Approve exact merge',merge:'Merge pull request',cleanup:'Clean worktree'};
+  $('#inspector-content').innerHTML = `<section class="inspector-section"><h3>Task</h3><p class="task-objective">${esc(task.objective)}</p><dl>${inspectorMetric('Status',label(task.status))}${inspectorMetric('Owner',(task.assignedTo ?? []).join(', ') || 'Unassigned')}${inspectorMetric('Dependencies',(task.dependencies ?? []).join(', ') || '—')}${inspectorMetric('Weight',task.weight)}</dl></section><section class="inspector-section delivery-section"><h3>GitHub delivery</h3><ol class="delivery-timeline">${timeline}</ol><dl>${inspectorMetric('Repository',delivery?.repository?.slug ?? snapshot.githubRepository?.slug)}${inspectorMetric('Issue',issue?`#${issue.entityNumber}`:'—')}${inspectorMetric('Branch',delivery?.branch)}${inspectorMetric('Pull request',pr?`#${pr.number}`:'—')}${inspectorMetric('Review',label(pr?.reviewState))}${inspectorMetric('CI',label(pr?.ciState))}${inspectorMetric('HEAD',pr?.headSha ?? delivery?.headSha)}</dl>${delivery?.blockedReason?`<p class="delivery-blocked">${esc(delivery.blockedReason)}</p>`:''}<div class="delivery-actions">${!issue&&invoke?'<button class="quiet-button" data-delivery-action="create-issue">Create linked issue</button>':''}${action&&invoke?`<button class="primary-button" data-delivery-action="${esc(action)}">${esc(actionLabels[action])}</button>`:'<p class="metric-note">Assign an agent to begin delivery, or use GitHub manually under the current policy.</p>'}${pr?.url?` <a class="quiet-link" href="${esc(pr.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a>`:''}</div></section>${routing ? `<section class="inspector-section"><h3>Intelligence assignment</h3><dl>${inspectorMetric('Resource',routing.selectedResourceId)}${inspectorMetric('Model',routing.selectedModel)}${inspectorMetric('Effort',label(routing.reasoningEffort))}${inspectorMetric('Conservative capability',selectedCandidate?.conservativeQualityScore == null ? '—' : Number(selectedCandidate.conservativeQualityScore).toFixed(1))}${inspectorMetric('Confidence',selectedCandidate?.capabilityConfidence == null ? 'Unknown' : calibrationPercent(selectedCandidate.capabilityConfidence))}${inspectorMetric('Actual outcome',label(calibration?.actualOutcome ?? 'UNKNOWN'))}</dl><p class="routing-reason">${esc(routing.reasons?.join(' · '))}</p><p class="metric-note">Shadow ranking: ${esc((routing.shadowRanking ?? []).join(' → ') || '—')}. Unselected outcomes remain unknown.</p></section>` : ''}<button class="primary-button" id="open-task-board">Open Task Board</button>`;
+  $$('[data-delivery-action]', $('#inspector-content')).forEach(button=>button.addEventListener('click',event=>runDeliveryAction(task,event.currentTarget.dataset.deliveryAction)));
   $('#open-task-board').addEventListener('click', () => switchView('tasks'));
+}
+
+async function runDeliveryAction(task,action){
+  const owner=task.assignedTo?.[0]; const args={taskId:task.id};
+  const calls={
+    'create-issue':()=>invoke('create_github_issue_for_task',{...args,labels:[]}),
+    prepare:()=>invoke('prepare_task_delivery',{...args,agentId:owner,base:null,policy:{required:true,autoCommit:true,autoPush:true,createPullRequest:true,draftPullRequest:false,mergePolicy:'GOD_APPROVAL',mergeMethod:'SQUASH',closeLinkedIssueAfterMerge:false,maxDeliveryAttempts:3}}),
+    commit:()=>invoke('commit_task_delivery',{...args,agentId:owner,summary:task.objective.slice(0,72)}),
+    push:()=>invoke('push_task_delivery',args),
+    'create-pr':()=>invoke('create_task_pull_request',{...args,tests:[]}),
+    sync:()=>invoke('sync_task_github',args),
+    'approve-merge':()=>invoke('request_task_merge_approval',args),
+    merge:()=>invoke('merge_task_pull_request',args),
+    cleanup:()=>invoke('cleanup_task_worktree',args)
+  };
+  if(!calls[action])return;
+  try{await calls[action]();await refreshSnapshot();const current=snapshot.tasks.find(item=>item.id===task.id);if(current)renderTaskInspector(current);}catch(error){window.alert(String(error));}
 }
 
 function renderRelationshipInspector(relationship) {
@@ -709,6 +747,17 @@ async function boot() {
 $$('[data-view]').forEach(button => button.addEventListener('click', () => switchView(button.dataset.view)));
 $$('[data-view-link]').forEach(button => button.addEventListener('click', () => switchView(button.dataset.viewLink)));
 $('#open-accounts').addEventListener('click', () => switchView('accounts'));
+$('#import-github-issue').addEventListener('click', async event => {
+  if (!invoke) return window.alert('GitHub issue import is available in the desktop app.');
+  const raw=window.prompt('GitHub issue number');
+  if (raw === null) return;
+  const issueNumber=Number(raw);
+  if (!Number.isSafeInteger(issueNumber) || issueNumber < 1) return window.alert('Enter a valid positive issue number.');
+  event.currentTarget.disabled=true;
+  try { await invoke('import_github_issue',{number:issueNumber}); await refreshSnapshot(); switchView('tasks'); }
+  catch (error) { window.alert(String(error)); }
+  finally { event.currentTarget.disabled=false; }
+});
 $('#refresh-providers').addEventListener('click', async () => { providers = await loadProviders(); renderProviders(); renderOverview(); renderResources(); });
 $('#copy-command').addEventListener('click', async event => {
   const resourceId = event.currentTarget.dataset.credentialResource;
@@ -802,7 +851,7 @@ $('#policy-form').addEventListener('submit', async event => {
     providerApprovalTimeoutSeconds:Number(form.elements.providerApprovalTimeoutSeconds.value),
     allowPayg:form.elements.allowPayg.checked,autoAgentCreation:form.elements.autoAgentCreation.checked,
     permanentAgentsRequireGod:true,allowedProviders:split(form.elements.allowedProviders.value),deniedProviders:split(form.elements.deniedProviders.value),
-    productionDeployRequiresGod:true
+    productionDeployRequiresGod:true,automaticSafeGithubMerge:form.elements.automaticSafeGithubMerge.checked
   };
   try {
     await sendMutation({type:'UPDATE_PROJECT_POLICY',data:{policy}}, 'Updated project governance policy');

@@ -85,6 +85,11 @@ impl ProjectStore {
             calibration_suggestions: vec![],
             promotion_suggestions: vec![],
             capability_learning_policy: Default::default(),
+            github_auth: None,
+            github_repository: None,
+            deliveries: vec![],
+            external_links: vec![],
+            remote_operations: vec![],
         })
     }
 

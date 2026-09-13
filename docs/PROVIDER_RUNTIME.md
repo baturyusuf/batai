@@ -103,3 +103,7 @@ cargo test --manifest-path src-tauri/Cargo.toml real_codex_turn_mutates_only_a_m
 It creates a disposable Git repository, assigns a Batai task to a Codex coding agent, creates a managed worktree, performs an actual inference turn that writes `hello.txt`, and verifies the result, provider/session/turn checkpoint, changed-file list and duplicate suppression. It records the Batai checkout status before and after, and removes the disposable mutation. No credential value is logged.
 
 Approval protocol tests use a deterministic fake App Server as their primary gate: a real provider cannot be relied upon to request a safe approval on demand. They cover same-request pause/resume, denial, expiry, cancellation, duplicate IDs, concurrent agents, restart orphaning and uncertain response delivery. The real acceptance test remains approval-free and deterministic.
+
+## GitHub delivery boundary
+
+GitHub is deterministic delivery infrastructure, not an intelligence provider. The Rust runtime invokes the authenticated official `gh` CLI with structured arguments and JSON output; it never extracts or stores GitHub credentials. Local Git worktrees, status, diffs and commits remain usable without GitHub. Issue, pull-request, review, checks and merge state are normalized by the separate `GitHubService` and coordinated by the restart-safe delivery saga described in [GitHub Delivery](GITHUB_DELIVERY.md).

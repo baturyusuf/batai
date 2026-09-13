@@ -4,6 +4,7 @@ use tokio::{sync::watch, task::JoinHandle};
 
 use super::{
     agents::AgentRegistry,
+    delivery::{CiState, DeliveryService},
     errors::Result,
     events::EventEngine,
     sessions::SessionManager,
@@ -27,6 +28,29 @@ impl DurableScheduler {
         interval: Duration,
         unknown_retry: Duration,
     ) -> Self {
+        Self::start_with_delivery(
+            store,
+            events,
+            agents,
+            sessions,
+            tasks,
+            None,
+            interval,
+            unknown_retry,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn start_with_delivery(
+        store: RuntimeStore,
+        events: EventEngine,
+        agents: AgentRegistry,
+        sessions: SessionManager,
+        tasks: Arc<TaskEngine>,
+        delivery: Option<DeliveryService>,
+        interval: Duration,
+        unknown_retry: Duration,
+    ) -> Self {
         let (stop, mut receiver) = watch::channel(false);
         let worker = tokio::spawn(async move {
             loop {
@@ -37,6 +61,59 @@ impl DurableScheduler {
                     .due_jobs(&chrono::Utc::now().to_rfc3339())
                     .unwrap_or_default();
                 for job in due {
+                    if job.kind == "GITHUB_CHECK" {
+                        let Some(delivery) = &delivery else {
+                            let _ = store.set_job_status(&job.id, SchedulerJobStatus::Failed, None);
+                            continue;
+                        };
+                        let Some(task_id) = job
+                            .payload
+                            .get("taskId")
+                            .and_then(serde_json::Value::as_str)
+                        else {
+                            let _ = store.set_job_status(&job.id, SchedulerJobStatus::Failed, None);
+                            continue;
+                        };
+                        if store
+                            .set_job_status(&job.id, SchedulerJobStatus::Running, None)
+                            .is_err()
+                        {
+                            continue;
+                        }
+                        match delivery.sync(task_id) {
+                            Ok(checkpoint)
+                                if checkpoint
+                                    .pull_request
+                                    .as_ref()
+                                    .is_some_and(|pr| pr.ci_state == CiState::Pending) =>
+                            {
+                                let retry = (chrono::Utc::now() + chrono::Duration::minutes(2))
+                                    .to_rfc3339();
+                                let _ = store.set_job_status(
+                                    &job.id,
+                                    SchedulerJobStatus::Pending,
+                                    Some(&retry),
+                                );
+                            }
+                            Ok(_) => {
+                                let _ = store.set_job_status(
+                                    &job.id,
+                                    SchedulerJobStatus::Completed,
+                                    None,
+                                );
+                            }
+                            Err(_) => {
+                                let retry = (chrono::Utc::now() + chrono::Duration::minutes(5))
+                                    .to_rfc3339();
+                                let _ = store.set_job_status(
+                                    &job.id,
+                                    SchedulerJobStatus::Pending,
+                                    Some(&retry),
+                                );
+                            }
+                        }
+                        continue;
+                    }
                     let Some(agent_id) = job.agent_id.clone() else {
                         let _ = store.set_job_status(&job.id, SchedulerJobStatus::Failed, None);
                         continue;

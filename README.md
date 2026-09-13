@@ -2,7 +2,7 @@
 
 **Batai** is a Director-managed, cost-aware runtime for heterogeneous AI developer teams.
 
-> The `codex/rust-rewrite` branch contains the Rust/Tauri desktop and deterministic execution runtime. The Node control plane remains temporarily as a compatibility/reference layer while real provider and remaining control-plane modules are migrated.
+> The `codex/rust-rewrite` branch contains the Rust/Tauri desktop and deterministic execution/runtime/delivery control plane. Node remains temporarily for the compatibility HTTP server and Director MCP entry point.
 
 The core idea is that the **Director AI operates the organization through Batai tools**. Batai itself stays deterministic wherever possible: task routing, dependencies, events, worktrees, quota waiting, session recovery and authority state should not spend LLM turns.
 
@@ -33,7 +33,7 @@ The core idea is that the **Director AI operates the organization through Batai 
 - Claude Code CLI adapter
 - Ollama local-model adapter
 - Mock provider for deterministic tests
-- GitHub CLI issue/PR adapter when `gh` is available
+- Rust-native GitHub delivery through the official authenticated `gh` CLI: issue↔task links, isolated commit/push, PR/review/CI state, SHA-bound merge governance and restart reconciliation
 - MCP-compatible Director control server
 - Live node-edge Organization Map with Hierarchy, Workflow and Combined modes, semantic edges, search, filters, pan/zoom and Agent Inspector
 - Organization Edit mode, Agent Factory form, GOD decisions, exact live provider approvals, recovery queue and project policy settings
@@ -75,7 +75,7 @@ npm run test:all
 npm run desktop:dev
 ```
 
-The Rust desktop ingests the existing `.batai` repository contract into SQLite, watches tasks, assigns coding agents safe task worktrees and executes Codex App Server, Claude Code or Ollama through provider-neutral sessions. State and usage updates stream into the UI without storing raw credentials. See [Provider Runtime](docs/PROVIDER_RUNTIME.md) for setup, security and diagnostics.
+The Rust desktop ingests the existing `.batai` repository contract into SQLite, watches tasks, assigns coding agents safe task worktrees and executes Codex App Server, Claude Code or Ollama through provider-neutral sessions. It can deliver reviewed work through repository-bound GitHub pull requests without the Node wrapper. State and usage updates stream into the UI without storing raw credentials. See [Provider Runtime](docs/PROVIDER_RUNTIME.md) and [GitHub Delivery](docs/GITHUB_DELIVERY.md).
 
 Run the authenticated, mutation-level Codex acceptance test only on an explicitly opted-in development machine:
 
@@ -178,7 +178,7 @@ tests/          orchestration/provider tests
 - Crash recovery preserves provider/session/worktree evidence and requires review after an uncertain provider mutation; it does not reattach to an independently surviving OS process.
 - Interactive Codex approvals pause the exact live request for bounded `Allow once`/`Deny` input. Headless, unsafe, expired and restarted requests fail closed; no blanket authorization is cached.
 - Cross-store organization mutations use a durable operation journal with forward completion, safe rollback and fingerprint-conflict review. Batai does not claim distributed ACID across the filesystem and SQLite.
-- GitHub lifecycle parity and some organizational-memory workflows still come from the Node compatibility layer.
+- The Node HTTP server and Director MCP stdio entry point remain compatibility surfaces; their retirement matrix is tracked in [Node Retirement](docs/NODE_RETIREMENT.md).
 - Runtime events expose observable execution trace, not hidden model reasoning. Fine-grained activities such as reading versus testing remain generic when a provider does not report them.
 - Subscription quota remains Unknown when no official quota endpoint is available; plan prices are user-supplied reporting data and never hard-coded as routing truth.
 - Offline replay can show a policy's alternative selection but cannot know whether that unexecuted resource would have succeeded or saved money; production exploration and automatic calibration are disabled.

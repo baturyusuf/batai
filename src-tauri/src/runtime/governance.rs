@@ -150,6 +150,10 @@ pub enum ProtectedOperation {
     ProductionDeployment,
     CreateGithubIssue,
     CreatePullRequest,
+    PushBranch,
+    RequestGithubReview,
+    MergePullRequest,
+    CloseGithubIssue,
     PaygSpend,
     ModifyAuthority,
     DeleteAudit,
@@ -176,6 +180,8 @@ pub struct ProjectGovernancePolicy {
     pub allowed_providers: Vec<String>,
     pub denied_providers: Vec<String>,
     pub production_deploy_requires_god: bool,
+    #[serde(default)]
+    pub automatic_safe_github_merge: bool,
     #[serde(default = "default_provider_approval_timeout")]
     pub provider_approval_timeout_seconds: u64,
     #[serde(flatten)]
@@ -194,6 +200,7 @@ impl Default for ProjectGovernancePolicy {
             allowed_providers: Vec::new(),
             denied_providers: Vec::new(),
             production_deploy_requires_god: true,
+            automatic_safe_github_merge: false,
             provider_approval_timeout_seconds: default_provider_approval_timeout(),
             legacy: serde_json::Map::new(),
         }
@@ -1446,6 +1453,54 @@ impl GovernanceService {
         Ok(Some(accepted as f64 * 100.0 / reviews.len() as f64))
     }
 
+    pub fn audit_delivery(
+        &self,
+        actor: &str,
+        action: &str,
+        target: Option<&str>,
+        task_id: Option<&str>,
+        outcome: MutationDisposition,
+        reason: Option<String>,
+    ) -> Result<()> {
+        let authority = if actor.eq_ignore_ascii_case("god") {
+            AuthorityRole::God
+        } else {
+            self.resolve_authority(actor)
+                .unwrap_or(AuthorityRole::Worker)
+        };
+        let record = AuditRecord {
+            id: format!("AUD-{}", uuid::Uuid::new_v4()),
+            timestamp: now(),
+            actor: actor.into(),
+            authority,
+            action: action.into(),
+            target: target.map(str::to_owned),
+            outcome,
+            reason,
+            decision_id: None,
+            task_id: task_id.map(str::to_owned),
+            revision: self.load_organization()?.revision,
+        };
+        let outcome = format!("{:?}", record.outcome).to_ascii_uppercase();
+        self.store.append_governance_audit(&GovernanceAuditRow {
+            id: &record.id,
+            timestamp: &record.timestamp,
+            actor: &record.actor,
+            action: &record.action,
+            target: record.target.as_deref(),
+            outcome: &outcome,
+            record_json: serde_json::to_string(&record)?,
+        })?;
+        self.events.publish(
+            EventType::AuditRecorded,
+            record.actor.clone(),
+            record.target.clone(),
+            record.task_id.clone(),
+            serde_json::to_value(record)?,
+        )?;
+        Ok(())
+    }
+
     fn apply(
         &self,
         request: MutationRequest,
@@ -1715,6 +1770,11 @@ impl GovernanceService {
                                 | AgentPermission::ManageOrganization
                                 | AgentPermission::ManageProviders
                                 | AgentPermission::ApprovePayg
+                                | AgentPermission::CreateGithubIssue
+                                | AgentPermission::CreatePullRequest
+                                | AgentPermission::PushBranch
+                                | AgentPermission::RequestGithubReview
+                                | AgentPermission::MergePullRequest
                         )
                     })
             }
@@ -1723,7 +1783,10 @@ impl GovernanceService {
                     .map(|agent| agent.lifecycle == AgentLifecycle::Permanent)?
             }
             OrganizationMutation::UpdateProjectPolicy { .. } => true,
-            OrganizationMutation::RequestProtectedAction { .. } => true,
+            OrganizationMutation::RequestProtectedAction { operation, .. } => !matches!(
+                operation,
+                ProtectedOperation::PushBranch | ProtectedOperation::RequestGithubReview
+            ),
             OrganizationMutation::ChangeProviderPolicy {
                 intelligence_policy,
                 ..
@@ -1746,6 +1809,14 @@ impl GovernanceService {
             | OrganizationMutation::ChangeReportingLine { .. } => {
                 AgentPermission::ManageOrganization
             }
+            OrganizationMutation::RequestProtectedAction { operation, .. } => match operation {
+                ProtectedOperation::PushBranch => AgentPermission::PushBranch,
+                ProtectedOperation::RequestGithubReview => AgentPermission::RequestGithubReview,
+                ProtectedOperation::CreateGithubIssue => AgentPermission::CreateGithubIssue,
+                ProtectedOperation::CreatePullRequest => AgentPermission::CreatePullRequest,
+                ProtectedOperation::MergePullRequest => AgentPermission::MergePullRequest,
+                _ => AgentPermission::ManageAgents,
+            },
             _ => AgentPermission::ManageAgents,
         };
         if actor.permissions.contains(&required) {

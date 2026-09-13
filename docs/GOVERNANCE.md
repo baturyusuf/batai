@@ -17,7 +17,7 @@ A higher seniority does not grant authority. `SENIOR`, `STAFF` and `PRINCIPAL` d
 
 The runtime routes every organization change through a typed `OrganizationMutation`. It validates the actor, optimistic organization revision, hierarchy, role catalog, provider allow/deny policy, active-agent/depth limits and protected-operation rules before writing. A denied or stale request does not perform the requested mutation. Stale clients receive a revision conflict and must reload before retrying.
 
-Protected operations require a mutation-bound GOD decision when requested by an AI actor. These include permanent-agent creation/termination, authority or high-risk permission grants, PAYG/provider policy expansion, project-policy changes, production deployment, GitHub issue/PR creation and audit deletion. Approval applies only the exact serialized mutation; rejection applies nothing. Resolution is idempotent.
+Protected operations require a mutation-bound GOD decision when requested by an AI actor. These include permanent-agent creation/termination, authority or high-risk permission grants, PAYG/provider policy expansion, project-policy changes, production deployment, GitHub issue/PR creation, PR merge and audit deletion. Approval applies only the exact serialized mutation; rejection applies nothing. Push and review-request permissions are separately scoped. Merge approval includes repository, PR and HEAD SHA; a new commit invalidates it.
 
 ## Lifecycle and Agent Factory
 
@@ -65,4 +65,4 @@ The UI shows observable execution events and audit history. Hidden chain-of-thou
 
 ## Current boundary
 
-The governance and live provider-approval queues are implemented for the Rust desktop runtime. The Node control plane remains a compatibility layer and has not yet been fully redirected through Rust mutations. Meeting scheduling/execution and automatic summaries are typed foundations, not a completed meeting product. A provider request cannot survive the death of its original App Server process; restart therefore orphans it and deliberately requires review rather than replay.
+The governance, live provider-approval queue and GitHub delivery mutations are implemented for the Rust desktop runtime. The Node HTTP/MCP control plane remains a compatibility entry point and has not yet been fully redirected to Rust. Meeting scheduling/execution and automatic summaries are typed foundations, not a completed meeting product. A provider request cannot survive the death of its original App Server process; restart therefore orphans it and deliberately requires review rather than replay.

@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 
 use crate::runtime::{
     benchmark::{BenchmarkResult, LocalModelCatalogEntry, ModelFitAssessment},
+    delivery::{
+        DeliveryCheckpoint, ExternalLink, GitHubAuthState, RemoteOperationJournal,
+        RepositoryIdentity,
+    },
     economic::{EconomicPolicy, ResourceProfile, RoutingDecision},
     execution_provider::UsageSnapshot,
     governance::GovernanceSnapshot,
@@ -243,6 +247,16 @@ pub struct AppSnapshot {
     pub promotion_suggestions: Vec<PromotionSuggestion>,
     #[serde(default)]
     pub capability_learning_policy: CapabilityLearningPolicy,
+    #[serde(default)]
+    pub github_auth: Option<GitHubAuthState>,
+    #[serde(default)]
+    pub github_repository: Option<RepositoryIdentity>,
+    #[serde(default)]
+    pub deliveries: Vec<DeliveryCheckpoint>,
+    #[serde(default)]
+    pub external_links: Vec<ExternalLink>,
+    #[serde(default)]
+    pub remote_operations: Vec<RemoteOperationJournal>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

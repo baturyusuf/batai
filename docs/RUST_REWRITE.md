@@ -58,12 +58,12 @@ Requirements:
 
 The legacy Node runtime remains in the branch during protocol migration. It provides compatibility and regression tests until the Rust task, event, session and resource engines reach feature parity.
 
-The Rust suite currently contains 116 tests. GitHub Actions validates the 35-test Node compatibility/UI suite on Linux and formatting, linting, tests and the desktop build on Windows. Real-provider smoke and mutation-level acceptance tests remain explicitly opt-in.
+The Rust suite currently contains 156 tests. GitHub Actions validates the 39-test Node compatibility/UI suite on Linux and formatting, linting, tests and the desktop build on Windows. Real-provider and real-GitHub mutation acceptance tests remain explicitly opt-in.
 
 ## Remaining migration slices
 
 1. Calibrate economic routing with opt-in real-task outcome evidence and governed hosted-resource capability editing.
-2. Extend journal-backed operations to future GitHub lifecycle actions and add a guided recovery inspection surface.
+2. Redirect or formally retire the remaining Node HTTP/MCP compatibility entry points after Rust tool-boundary parity is proven.
 3. Add native project picker, terminal, diff and test panels.
 4. Implement meeting scheduling and safe observable summaries on the typed meeting foundation.
 5. Remove the Node runtime only after real-provider and control-plane parity tests pass.

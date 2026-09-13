@@ -310,14 +310,21 @@ impl TaskEngine {
         let combined = serde_json::json!({"task_id":task_id,"results":runs.iter().filter_map(|run|run.result.clone()).collect::<Vec<_>>(),
             "completed_at":chrono::Utc::now().to_rfc3339()});
         self.store.set_task_result(task_id, &combined)?;
-        if task.execution.requires_director_review {
+        let delivery_required = task
+            .extra
+            .get("delivery")
+            .and_then(|value| {
+                serde_json::from_value::<super::delivery::DeliveryPolicy>(value.clone()).ok()
+            })
+            .is_some_and(|policy| policy.required);
+        if task.execution.requires_director_review || delivery_required {
             self.set_status(task_id, TaskStatus::Review)?;
             self.events.publish(
                 EventType::ReviewRequired,
                 "batai",
                 Some("director".into()),
                 Some(task_id.into()),
-                combined,
+                serde_json::json!({"result":combined,"deliveryRequired":delivery_required}),
             )?;
         } else {
             self.complete(task_id, "batai", combined).await?;
@@ -1043,6 +1050,26 @@ impl TaskEngine {
             return Err(RuntimeError::InvalidTask {
                 task_id: task_id.into(),
                 message: "not awaiting review".into(),
+            });
+        }
+        let delivery_required = task
+            .extra
+            .get("delivery")
+            .and_then(|value| {
+                serde_json::from_value::<super::delivery::DeliveryPolicy>(value.clone()).ok()
+            })
+            .is_some_and(|policy| policy.required);
+        if delivery_required
+            && !self
+                .store
+                .get_delivery_checkpoint(task_id)?
+                .is_some_and(|checkpoint| {
+                    checkpoint.state == super::delivery::DeliveryState::Merged
+                })
+        {
+            return Err(RuntimeError::InvalidTask {
+                task_id: task_id.into(),
+                message: "delivery is required; completion waits for merged pull request".into(),
             });
         }
         self.complete(task_id, reviewer, serde_json::json!({"approved":true}))

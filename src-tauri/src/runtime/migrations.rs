@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use super::errors::Result;
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(
@@ -202,6 +202,32 @@ pub fn migrate(connection: &mut Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS capability_learning_policy (
           scope TEXT PRIMARY KEY, policy_json TEXT NOT NULL, updated_at TEXT NOT NULL
         );
+        "#,
+    )?;
+    apply(
+        connection,
+        11,
+        r#"
+        CREATE TABLE IF NOT EXISTS external_links (
+          id TEXT PRIMARY KEY, task_id TEXT NOT NULL, provider TEXT NOT NULL,
+          repository TEXT NOT NULL, entity_type TEXT NOT NULL, entity_number INTEGER NOT NULL,
+          url TEXT NOT NULL, link_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          UNIQUE(provider, repository, entity_type, entity_number),
+          UNIQUE(task_id, provider, repository, entity_type)
+        );
+        CREATE INDEX IF NOT EXISTS idx_external_links_task ON external_links(task_id, entity_type);
+        CREATE TABLE IF NOT EXISTS delivery_checkpoints (
+          task_id TEXT PRIMARY KEY, state TEXT NOT NULL, repository TEXT NOT NULL,
+          branch TEXT NOT NULL, head_sha TEXT, checkpoint_json TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_delivery_state ON delivery_checkpoints(state, updated_at);
+        CREATE TABLE IF NOT EXISTS remote_operation_journal (
+          id TEXT PRIMARY KEY, operation_type TEXT NOT NULL, phase TEXT NOT NULL,
+          task_id TEXT NOT NULL, repository TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE,
+          record_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_remote_operation_phase
+          ON remote_operation_journal(phase, updated_at);
         "#,
     )?;
     Ok(())

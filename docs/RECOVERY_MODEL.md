@@ -4,7 +4,9 @@ Batai does **not** claim a distributed ACID transaction across the filesystem an
 
 ## Journal boundary
 
-The journal protects mutations that need consistency across declarative project state under `.batai` and runtime state in SQLite. Current operation types cover agent create/update, reporting and organizational relationship changes, policy changes, decision-bound mutations and task/worktree metadata assignment. Ordinary single-table runtime updates do not create journal noise. The record structure is extensible for future GitHub lifecycle operations.
+The filesystem/SQLite journal protects mutations that need consistency across declarative project state under `.batai` and runtime state in SQLite. Current operation types cover agent create/update, reporting and organizational relationship changes, policy changes, decision-bound mutations and task/worktree metadata assignment. Ordinary single-table runtime updates do not create journal noise.
+
+GitHub uses a separate remote side-effect saga journal. GitHub cannot participate in a local transaction, so issue creation, branch push, PR creation/update, merge and issue close are prepared durably, reconciled against repository-bound remote truth, then committed locally. Crash-after-PR adopts the existing branch PR; crash-after-merge adopts the merged PR. Ambiguous remote state requires review and is never replayed blindly. See [GitHub Delivery](GITHUB_DELIVERY.md).
 
 Each record contains a stable operation ID and type, actor and target, organization revision before/after, timestamps, current phase, affected files and database entities, preimage and intended fingerprints, optional bounded file preimages, decision/task correlation, failure details and recovery disposition. Secrets and provider credentials are excluded.
 

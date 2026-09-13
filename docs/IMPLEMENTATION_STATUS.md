@@ -24,7 +24,7 @@
 - Web control plane
 - HTTP control-plane validation for malformed JSON and invalid payloads
 
-Automated compatibility/UI suite: **37 passing Node tests** at the time of this snapshot.
+Automated compatibility/UI suite: **39 passing Node tests** at the time of this snapshot.
 
 ## Implemented and smoke-tested at protocol/process level
 
@@ -93,10 +93,13 @@ Automated compatibility/UI suite: **37 passing Node tests** at the time of this 
 - Deterministic calibrated capability profiles with recency, sample/diversity confidence, per-source provenance, hardware-aware latency and disagreement-safe routing estimates.
 - Versioned routing calibration, shadow rankings, no-inference offline replay, manual audited GOD evidence and governance-only promotion suggestions.
 - Capability Evidence, Router Calibration, Routing History and replay views; connection smoke remains connectivity-only and Z.AI warning acknowledgement does not bypass terms eligibility.
-- One hundred thirty-three passing Rust tests, including capability learning, governance, hardware, benchmark, fake provider, storage and confidence-aware routing coverage.
+- Rust-native GitHub delivery with official `gh` authentication/repository binding, typed issues/PRs/reviews/checks, issue-task links, isolated commit/push, PR idempotence, durable CI refresh, SHA-bound merge governance and remote saga recovery.
+- Task delivery timeline and PR inspector with explicit merge controls; required delivery pauses task completion until a merged PR is observed.
+- Node GitHub and worktree wrappers are no longer used by the production desktop; the Node HTTP/MCP entry points remain a compatibility boundary documented in `NODE_RETIREMENT.md`.
+- One hundred fifty-six passing Rust tests, including local bare-remote delivery, duplicate import/PR, exact issue-marker recovery, CI invalidation and crash reconciliation coverage.
 - Manual UI smoke at 1440x900 and 1100x720 with no JavaScript console errors.
 
-The Node HTTP control plane remains as a compatibility layer until the Rust task, event, session and resource engines reach feature parity.
+The Node HTTP/MCP control plane remains as a compatibility layer; the production Rust desktop GitHub lifecycle no longer depends on it.
 
 ## Next engineering milestones
 
@@ -104,5 +107,5 @@ The Node HTTP control plane remains as a compatibility layer until the Rust task
 2. Implement meeting scheduling, event-derived temporary graph groups and automatic safe summaries on the typed meeting foundation.
 3. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
 4. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.
-5. Redirect the remaining Node authority/GitHub lifecycle entry points through Rust mutations, then remove the compatibility runtime after parity.
+5. Redirect the published Node HTTP/MCP entry points to the Rust command surface, then remove the compatibility runtime after parity.
 6. Add native editor/LSP/terminal integration beyond the workspace scaffold.

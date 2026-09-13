@@ -135,7 +135,20 @@ uppercase_enum!(EventType {
     OperationRecovered,
     OperationCommitted,
     OperationRolledBack,
-    OperationRecoveryRequired
+    OperationRecoveryRequired,
+    GithubIssueLinked,
+    DeliveryCommitted,
+    BranchPushed,
+    PullRequestCreated,
+    PullRequestUpdated,
+    PullRequestReviewRequired,
+    PullRequestReviewApproved,
+    PullRequestChangesRequested,
+    CiPending,
+    CiPassed,
+    CiFailed,
+    MergeRequired,
+    PullRequestMerged
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

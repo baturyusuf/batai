@@ -340,6 +340,11 @@ pub enum AgentPermission {
     ManageOrganization,
     ManageProviders,
     ApprovePayg,
+    CreateGithubIssue,
+    CreatePullRequest,
+    PushBranch,
+    RequestGithubReview,
+    MergePullRequest,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

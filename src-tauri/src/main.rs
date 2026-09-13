@@ -12,6 +12,7 @@ use tauri::Emitter;
 
 use domain::{AppSnapshot, ConnectionGuide, MessageReceipt, ProviderConnection};
 use project::{discover_project_root, ProjectStore};
+use runtime::delivery::{DeliveryCheckpoint, DeliveryPolicy, ExternalLink};
 use runtime::governance::{
     Actor, AuthorityScope, ManualCapabilityEdit, MutationRequest, MutationResult, ProviderApproval,
     ReviewOutcome,
@@ -442,6 +443,165 @@ fn send_director_message(
         .map_err(|error| error.to_string())
 }
 
+fn god_actor() -> Actor {
+    Actor {
+        id: "god".into(),
+        scope: AuthorityScope::Project,
+    }
+}
+
+#[tauri::command]
+fn import_github_issue(
+    number: u64,
+    state: tauri::State<'_, AppState>,
+) -> Result<runtime::types::Task, String> {
+    state
+        .runtime
+        .delivery
+        .import_issue(number, "god")
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_github_issue_for_task(
+    task_id: String,
+    labels: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<ExternalLink, String> {
+    state
+        .runtime
+        .delivery
+        .create_issue_for_task(&task_id, god_actor(), &labels)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn prepare_task_delivery(
+    task_id: String,
+    agent_id: String,
+    base: Option<String>,
+    policy: DeliveryPolicy,
+    state: tauri::State<'_, AppState>,
+) -> Result<DeliveryCheckpoint, String> {
+    state
+        .runtime
+        .delivery
+        .prepare_worktree(&task_id, &agent_id, base.as_deref(), policy)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn commit_task_delivery(
+    task_id: String,
+    agent_id: String,
+    summary: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<DeliveryCheckpoint, String> {
+    state
+        .runtime
+        .delivery
+        .commit(&task_id, &agent_id, summary.as_deref())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn push_task_delivery(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DeliveryCheckpoint, String> {
+    state
+        .runtime
+        .delivery
+        .push(&task_id, "god")
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn create_task_pull_request(
+    task_id: String,
+    tests: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<DeliveryCheckpoint, String> {
+    state
+        .runtime
+        .delivery
+        .create_pull_request(&task_id, god_actor(), &tests)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn sync_task_github(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DeliveryCheckpoint, String> {
+    state
+        .runtime
+        .delivery
+        .sync(&task_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn request_task_github_review(
+    task_id: String,
+    reviewer: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DeliveryCheckpoint, String> {
+    state
+        .runtime
+        .delivery
+        .request_github_review(&task_id, god_actor(), &reviewer)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn request_task_merge_approval(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DeliveryCheckpoint, String> {
+    state
+        .runtime
+        .delivery
+        .request_merge_approval(&task_id, god_actor())
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn merge_task_pull_request(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DeliveryCheckpoint, String> {
+    state
+        .runtime
+        .delivery
+        .merge(&task_id, "god")
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn cleanup_task_worktree(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<DeliveryCheckpoint, String> {
+    state
+        .runtime
+        .delivery
+        .cleanup_worktree(&task_id)
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn close_task_github_issue(
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ExternalLink, String> {
+    state
+        .runtime
+        .delivery
+        .close_linked_issue(&task_id, god_actor())
+        .map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 async fn cancel_task(task_id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     state
@@ -501,11 +661,26 @@ fn record_review_outcome(
     review: ReviewOutcome,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
-    state
+    if state
         .runtime
-        .governance
-        .record_review(review)
-        .map_err(|error| error.to_string())
+        .store
+        .get_delivery_checkpoint(&review.task_id)
+        .map_err(|error| error.to_string())?
+        .is_some()
+    {
+        state
+            .runtime
+            .delivery
+            .record_internal_review(review)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    } else {
+        state
+            .runtime
+            .governance
+            .record_review(review)
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[tauri::command]
@@ -557,6 +732,18 @@ fn main() {
             replay_routing_decision,
             test_resource_connection,
             send_director_message,
+            import_github_issue,
+            create_github_issue_for_task,
+            prepare_task_delivery,
+            commit_task_delivery,
+            push_task_delivery,
+            create_task_pull_request,
+            sync_task_github,
+            request_task_github_review,
+            request_task_merge_approval,
+            merge_task_pull_request,
+            cleanup_task_worktree,
+            close_task_github_issue,
             cancel_task,
             mutate_organization,
             resolve_god_decision,

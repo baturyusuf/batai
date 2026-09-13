@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod benchmark;
 pub mod credentials;
+pub mod delivery;
 pub mod economic;
 pub mod errors;
 pub mod events;
@@ -55,6 +56,7 @@ pub struct BataiRuntime {
     pub tasks: Arc<TaskEngine>,
     pub sessions: SessionManager,
     pub governance: GovernanceService,
+    pub delivery: delivery::DeliveryService,
     watcher: Mutex<Option<TaskWatcher>>,
     organization_watcher: Mutex<Option<OrganizationWatcher>>,
     scheduler: tokio::sync::Mutex<Option<DurableScheduler>>,
@@ -156,6 +158,12 @@ impl BataiRuntime {
         providers: HashMap<String, Arc<dyn ExecutionProvider>>,
     ) -> Result<Arc<Self>> {
         let sessions = SessionManager::new(store.clone(), providers);
+        let delivery = delivery::DeliveryService::new(
+            root.clone(),
+            store.clone(),
+            events.clone(),
+            governance.clone(),
+        );
         let mut task_engine = TaskEngine::new(
             store.clone(),
             events.clone(),
@@ -181,6 +189,7 @@ impl BataiRuntime {
             tasks,
             sessions,
             governance,
+            delivery,
             watcher: Mutex::new(None),
             organization_watcher: Mutex::new(None),
             scheduler: tokio::sync::Mutex::new(None),
@@ -189,6 +198,7 @@ impl BataiRuntime {
 
     pub async fn start(self: &Arc<Self>) -> Result<()> {
         self.governance.reconcile_startup()?;
+        self.delivery.reconcile_startup()?;
         self.store.reconcile_interrupted()?;
         self.load_agents()?;
         let watcher = TaskWatcher::start(
@@ -214,12 +224,13 @@ impl BataiRuntime {
             .lock()
             .map_err(|_| errors::RuntimeError::Lock("organization watcher"))? =
             Some(organization_watcher);
-        *self.scheduler.lock().await = Some(DurableScheduler::start(
+        *self.scheduler.lock().await = Some(DurableScheduler::start_with_delivery(
             self.store.clone(),
             self.events.clone(),
             self.agents.clone(),
             self.sessions.clone(),
             Arc::clone(&self.tasks),
+            Some(self.delivery.clone()),
             Duration::from_secs(30),
             Duration::from_secs(15 * 60),
         ));
@@ -608,6 +619,11 @@ impl BataiRuntime {
                 learning::promotion_suggestion(&agent.id, seniority, &task_outcomes)
             })
             .collect();
+        let github_auth = Some(self.delivery.auth_status());
+        let github_repository = self.delivery.repository().ok();
+        let deliveries = self.store.list_delivery_checkpoints()?;
+        let external_links = self.store.list_external_links(None)?;
+        let remote_operations = self.store.list_remote_operations(100)?;
         Ok(AppSnapshot {
             god: GodView {
                 id: "god".into(),
@@ -641,6 +657,11 @@ impl BataiRuntime {
             calibration_suggestions,
             promotion_suggestions,
             capability_learning_policy: learning_policy,
+            github_auth,
+            github_repository,
+            deliveries,
+            external_links,
+            remote_operations,
         })
     }
 }

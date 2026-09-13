@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use super::{
     benchmark::BenchmarkResult,
+    delivery::{DeliveryCheckpoint, ExternalLink, RemoteOperationJournal},
     economic::{EconomicPolicy, ResourceProfile, RoutingDecision},
     errors::{Result, RuntimeError},
     learning::{CapabilityLearningPolicy, RoutingCalibrationRecord, TaskOutcomeEvidence},
@@ -69,6 +70,175 @@ impl RuntimeStore {
             [],
             |row| row.get(0),
         )?)
+    }
+
+    pub fn upsert_external_link(&self, link: &ExternalLink) -> Result<()> {
+        self.db()?.execute(
+            r#"INSERT INTO external_links(id,task_id,provider,repository,entity_type,entity_number,url,link_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,repository,entity_type,entity_number)
+               DO UPDATE SET task_id=excluded.task_id,url=excluded.url,link_json=excluded.link_json,updated_at=excluded.updated_at"#,
+            params![link.id,link.task_id,link.provider,link.repository,link.entity_type,i64::try_from(link.entity_number).map_err(|_|RuntimeError::Provider("GitHub entity number exceeds SQLite range".into()))?,
+                link.url,serde_json::to_string(link)?,link.created_at,link.updated_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn external_link_by_entity(
+        &self,
+        provider: &str,
+        repository: &str,
+        entity_type: &str,
+        number: u64,
+    ) -> Result<Option<ExternalLink>> {
+        self.db()?.query_row(
+            "SELECT link_json FROM external_links WHERE provider=? AND repository=? AND entity_type=? AND entity_number=?",
+            params![provider,repository,entity_type,i64::try_from(number).map_err(|_|RuntimeError::Provider("GitHub entity number exceeds SQLite range".into()))?],
+            |row| json_column(row.get::<_,String>(0)?),
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn external_link_by_task(
+        &self,
+        task_id: &str,
+        entity_type: &str,
+    ) -> Result<Option<ExternalLink>> {
+        self.db()?.query_row(
+            "SELECT link_json FROM external_links WHERE task_id=? AND entity_type=? ORDER BY updated_at DESC LIMIT 1",
+            params![task_id,entity_type],
+            |row| json_column(row.get::<_,String>(0)?),
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn list_external_links(&self, task_id: Option<&str>) -> Result<Vec<ExternalLink>> {
+        let db = self.db()?;
+        if let Some(task_id) = task_id {
+            let mut statement = db.prepare(
+                "SELECT link_json FROM external_links WHERE task_id=? ORDER BY updated_at",
+            )?;
+            let values = statement
+                .query_map([task_id], |row| json_column(row.get::<_, String>(0)?))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(values)
+        } else {
+            let mut statement =
+                db.prepare("SELECT link_json FROM external_links ORDER BY updated_at")?;
+            let values = statement
+                .query_map([], |row| json_column(row.get::<_, String>(0)?))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            Ok(values)
+        }
+    }
+
+    pub fn upsert_delivery_checkpoint(&self, checkpoint: &DeliveryCheckpoint) -> Result<()> {
+        self.db()?.execute(
+            r#"INSERT INTO delivery_checkpoints(task_id,state,repository,branch,head_sha,checkpoint_json,updated_at)
+               VALUES(?,?,?,?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET state=excluded.state,
+               repository=excluded.repository,branch=excluded.branch,head_sha=excluded.head_sha,
+               checkpoint_json=excluded.checkpoint_json,updated_at=excluded.updated_at"#,
+            params![checkpoint.task_id,enum_column(checkpoint.state)?,checkpoint.repository.slug,
+                checkpoint.branch,checkpoint.head_sha,serde_json::to_string(checkpoint)?,checkpoint.last_synced_at],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_delivery_checkpoint(&self, task_id: &str) -> Result<Option<DeliveryCheckpoint>> {
+        self.db()?
+            .query_row(
+                "SELECT checkpoint_json FROM delivery_checkpoints WHERE task_id=?",
+                [task_id],
+                |row| json_column(row.get::<_, String>(0)?),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_delivery_checkpoints(&self) -> Result<Vec<DeliveryCheckpoint>> {
+        let db = self.db()?;
+        let mut statement = db
+            .prepare("SELECT checkpoint_json FROM delivery_checkpoints ORDER BY updated_at DESC")?;
+        let values = statement
+            .query_map([], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn upsert_remote_operation(&self, journal: &RemoteOperationJournal) -> Result<()> {
+        self.db()?.execute(r#"INSERT INTO remote_operation_journal(id,operation_type,phase,task_id,repository,idempotency_key,record_json,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(idempotency_key) DO UPDATE SET phase=excluded.phase,record_json=excluded.record_json,updated_at=excluded.updated_at"#,
+          params![journal.id,enum_column(journal.operation_type)?,enum_column(journal.phase)?,journal.task_id,journal.repository,journal.idempotency_key,serde_json::to_string(journal)?,journal.created_at,journal.updated_at])?;
+        Ok(())
+    }
+
+    pub fn remote_operation_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<RemoteOperationJournal>> {
+        self.db()?
+            .query_row(
+                "SELECT record_json FROM remote_operation_journal WHERE idempotency_key=?",
+                [idempotency_key],
+                |row| json_column(row.get::<_, String>(0)?),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_unfinished_remote_operations(&self) -> Result<Vec<RemoteOperationJournal>> {
+        let db = self.db()?;
+        let mut statement=db.prepare("SELECT record_json FROM remote_operation_journal WHERE phase NOT IN ('COMMITTED','ROLLED_BACK') ORDER BY created_at")?;
+        let values = statement
+            .query_map([], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn list_remote_operations(&self, limit: usize) -> Result<Vec<RemoteOperationJournal>> {
+        let db = self.db()?;
+        let mut statement = db.prepare(
+            "SELECT record_json FROM remote_operation_journal ORDER BY updated_at DESC LIMIT ?",
+        )?;
+        let values = statement
+            .query_map([limit as i64], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn has_unfinished_remote_operations(&self, task_id: &str) -> Result<bool> {
+        Ok(self.db()?.query_row("SELECT EXISTS(SELECT 1 FROM remote_operation_journal WHERE task_id=? AND phase NOT IN ('COMMITTED','ROLLED_BACK'))",[task_id],|row|row.get(0))?)
+    }
+
+    pub fn schedule_github_check(&self, task_id: &str, run_at: &str) -> Result<SchedulerJob> {
+        let key = format!("github:{task_id}");
+        let existing = {
+            let db = self.db()?;
+            db.query_row(
+                "SELECT id FROM scheduler_jobs WHERE kind='GITHUB_CHECK' AND agent_id=? AND status IN ('PENDING','RUNNING') LIMIT 1",
+                [&key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        };
+        if let Some(id) = existing {
+            self.db()?.execute(
+                "UPDATE scheduler_jobs SET run_at=?,status='PENDING',updated_at=? WHERE id=?",
+                params![run_at, now(), id],
+            )?;
+            return self
+                .get_job(&id)?
+                .ok_or_else(|| RuntimeError::Provider("GitHub scheduler update failed".into()));
+        }
+        let job = SchedulerJob {
+            id: format!("JOB-{}", uuid::Uuid::new_v4()),
+            kind: "GITHUB_CHECK".into(),
+            agent_id: Some(key),
+            run_at: run_at.into(),
+            payload: serde_json::json!({"taskId":task_id}),
+            status: SchedulerJobStatus::Pending,
+            attempts: 0,
+            updated_at: now(),
+        };
+        self.db()?.execute("INSERT INTO scheduler_jobs(id,kind,run_at,payload_json,status,updated_at,agent_id,attempts) VALUES(?,?,?,?,?,?,?,?)",params![job.id,job.kind,job.run_at,serde_json::to_string(&job.payload)?,job.status.to_string(),job.updated_at,job.agent_id,job.attempts])?;
+        Ok(job)
     }
 
     pub fn upsert_intelligence_resource(&self, profile: &ResourceProfile) -> Result<()> {
@@ -1001,4 +1171,11 @@ fn json_column<T: serde::de::DeserializeOwned>(value: String) -> rusqlite::Resul
 
 fn optional_json(value: Option<String>) -> rusqlite::Result<Option<Value>> {
     value.map(json_column).transpose()
+}
+
+fn enum_column<T: serde::Serialize>(value: T) -> Result<String> {
+    serde_json::to_value(value)?
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| RuntimeError::Provider("enum did not serialize as a string".into()))
 }

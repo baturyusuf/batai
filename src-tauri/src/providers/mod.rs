@@ -1,6 +1,7 @@
 pub mod claude_code;
 mod cli;
 pub mod codex_app_server;
+pub mod github_cli;
 pub mod kimi_code;
 pub mod minimax_token;
 pub mod ollama;

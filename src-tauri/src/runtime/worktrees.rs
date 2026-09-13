@@ -38,12 +38,24 @@ impl WorktreeManager {
     }
 
     pub fn ensure(&self, agent_id: &str, task_id: &str) -> Result<WorktreeBinding> {
+        self.ensure_from(agent_id, task_id, "HEAD")
+    }
+
+    pub fn ensure_from(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+        base_ref: &str,
+    ) -> Result<WorktreeBinding> {
         let agent = safe_component(agent_id)?;
         let task = safe_component(task_id)?;
+        if base_ref.trim().is_empty() || base_ref.starts_with('-') {
+            return Err(RuntimeError::Provider("unsafe base ref".into()));
+        }
         std::fs::create_dir_all(&self.root)?;
         let path = self.root.join(format!("{agent}-{task}"));
         let branch = format!("batai/{agent}/{task}");
-        let base_commit = run_git(&self.repository, &["rev-parse", "HEAD"])?
+        let base_commit = run_git(&self.repository, &["rev-parse", base_ref])?
             .trim()
             .to_owned();
         if path.exists() {
@@ -53,6 +65,14 @@ impl WorktreeManager {
                 return Err(RuntimeError::Provider(
                     "worktree escaped managed root".into(),
                 ));
+            }
+            let actual_branch = run_git(&actual, &["branch", "--show-current"])?
+                .trim()
+                .to_owned();
+            if actual_branch != branch {
+                return Err(RuntimeError::Governance(format!(
+                    "managed worktree branch mismatch: expected {branch}, found {actual_branch}"
+                )));
             }
             let starting_head = run_git(&path, &["rev-parse", "HEAD"])?.trim().to_owned();
             return Ok(WorktreeBinding {
@@ -85,7 +105,7 @@ impl WorktreeManager {
             checked(
                 Command::new("git")
                     .current_dir(&self.repository)
-                    .args(["worktree", "add", "-b", &branch, &path_text, "HEAD"])
+                    .args(["worktree", "add", "-b", &branch, &path_text, base_ref])
                     .output()?,
             )?;
         }
@@ -108,6 +128,56 @@ impl WorktreeManager {
     }
     pub fn diff(&self, binding: &WorktreeBinding) -> Result<String> {
         run_git(&binding.path, &["diff", "--binary", "HEAD"])
+    }
+    pub fn validate_commit_files(
+        &self,
+        binding: &WorktreeBinding,
+        max_file_bytes: u64,
+    ) -> Result<()> {
+        let output = checked(
+            Command::new("git")
+                .current_dir(&binding.path)
+                .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+                .output()?,
+        )?;
+        let root = binding.path.canonicalize()?;
+        let mut skip_rename_source = false;
+        for entry in output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            if skip_rename_source {
+                skip_rename_source = false;
+                continue;
+            }
+            if entry.len() < 4 {
+                continue;
+            }
+            let status = &entry[..2];
+            let relative = std::str::from_utf8(&entry[3..])
+                .map_err(|_| RuntimeError::Provider("Git path is not valid UTF-8".into()))?;
+            if matches!(status[0], b'R' | b'C') || matches!(status[1], b'R' | b'C') {
+                skip_rename_source = true;
+            }
+            let candidate = binding.path.join(relative);
+            if !candidate.exists() {
+                continue;
+            }
+            let actual = candidate.canonicalize()?;
+            if !actual.starts_with(&root) {
+                return Err(RuntimeError::Provider(
+                    "changed file escapes the managed worktree".into(),
+                ));
+            }
+            let metadata = std::fs::metadata(&actual)?;
+            if metadata.is_file() && metadata.len() > max_file_bytes {
+                return Err(RuntimeError::Provider(format!(
+                    "changed file exceeds safe automatic commit limit: {relative}"
+                )));
+            }
+        }
+        Ok(())
     }
     pub fn head(&self, binding: &WorktreeBinding) -> Result<String> {
         Ok(run_git(&binding.path, &["rev-parse", "HEAD"])?
@@ -287,6 +357,16 @@ mod tests {
         assert!(manager.ensure("../outside", "task").is_err());
         assert!(!role_requires_worktree("Product Analyst"));
         assert!(role_requires_worktree("Software Engineer"));
+    }
+
+    #[test]
+    fn reused_worktree_must_still_be_on_its_task_branch() {
+        let repo = repo();
+        let manager = WorktreeManager::discover(repo.path()).unwrap();
+        let binding = manager.ensure("coder", "TASK-1").unwrap();
+        run_git(&binding.path, &["checkout", "-b", "unexpected"]).unwrap();
+        let error = manager.ensure("coder", "TASK-1").unwrap_err();
+        assert!(error.to_string().contains("branch mismatch"));
     }
 
     #[test]

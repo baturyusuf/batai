@@ -741,6 +741,30 @@ async fn director_review_gate_precedes_completion() {
 }
 
 #[tokio::test]
+async fn required_delivery_does_not_complete_when_code_execution_finishes() {
+    let h = harness(RuntimeStore::open_memory().expect("store"));
+    register(&h, &["a"]);
+    let mut value = task("delivery", &["a"], &[]);
+    value
+        .extra
+        .insert("delivery".into(), serde_json::json!({"required":true}));
+    h.engine.ingest(value, None).await.expect("ingest");
+    assert_eq!(
+        h.store.get_task("delivery").unwrap().unwrap().status,
+        TaskStatus::Review
+    );
+    assert!(h
+        .engine
+        .approve_review("delivery", "director")
+        .await
+        .is_err());
+    assert_eq!(
+        h.store.get_task("delivery").unwrap().unwrap().status,
+        TaskStatus::Review
+    );
+}
+
+#[tokio::test]
 async fn resource_rate_limit_parks_only_affected_agent() {
     let h = harness(RuntimeStore::open_memory().expect("store"));
     register(&h, &["a", "b"]);
@@ -997,6 +1021,21 @@ fn duplicate_resource_jobs_are_coalesced_per_agent() {
         .expect("second");
     assert_eq!(first.id, second.id);
     assert_eq!(second.run_at, "2026-01-02T00:00:00Z");
+}
+
+#[test]
+fn duplicate_github_check_jobs_are_coalesced_per_task() {
+    let store = RuntimeStore::open_memory().expect("store");
+    let first = store
+        .schedule_github_check("TASK-1", &chrono::Utc::now().to_rfc3339())
+        .unwrap();
+    let second = store
+        .schedule_github_check(
+            "TASK-1",
+            &(chrono::Utc::now() + chrono::Duration::minutes(2)).to_rfc3339(),
+        )
+        .unwrap();
+    assert_eq!(first.id, second.id);
 }
 
 #[tokio::test]
