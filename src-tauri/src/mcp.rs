@@ -1,0 +1,508 @@
+//! MCP stdio transport for the shared Rust application kernel.
+
+use std::sync::Arc;
+
+use rmcp::{
+    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    model::{ServerCapabilities, ServerInfo},
+    tool, tool_handler, tool_router, Json, ServerHandler, ServiceExt,
+};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::{
+    application::{
+        BataiApplication, CreateGithubIssueRequest, DecisionRequest, LegacyAssignTask,
+        LegacyCreateAgent,
+    },
+    providers::process_supervisor::redact_secrets,
+};
+
+#[derive(Clone)]
+pub struct DirectorMcpServer {
+    application: Arc<BataiApplication>,
+    tool_router: ToolRouter<Self>,
+}
+
+impl DirectorMcpServer {
+    pub fn new(application: Arc<BataiApplication>) -> Self {
+        Self {
+            application,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    pub fn tool_names(&self) -> Vec<String> {
+        let mut names = self
+            .tool_router
+            .list_all()
+            .iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+}
+
+#[tool_router(router = tool_router)]
+impl DirectorMcpServer {
+    #[tool(
+        name = "batai_create_agent",
+        description = "Create a task-scoped or project agent through Rust governance. Permanent or privileged agents may require an exact GOD decision."
+    )]
+    async fn create_agent(
+        &self,
+        Parameters(input): Parameters<LegacyCreateAgent>,
+    ) -> Result<Json<Value>, String> {
+        value(self.application.create_agent(input))
+    }
+
+    #[tool(
+        name = "batai_assign_task",
+        description = "Create and evaluate a typed Batai task through the Rust task engine."
+    )]
+    async fn assign_task(
+        &self,
+        Parameters(input): Parameters<LegacyAssignTask>,
+    ) -> Result<Json<Value>, String> {
+        value(self.application.assign_task(input).await)
+    }
+
+    #[tool(
+        name = "batai_read_project_state",
+        description = "Read the same secret-filtered Rust application snapshot used by the desktop and HTTP control plane."
+    )]
+    async fn read_project_state(&self) -> Result<Json<Value>, String> {
+        value(self.application.external_snapshot())
+    }
+
+    #[tool(
+        name = "batai_approve_task",
+        description = "Approve a task at the Director review gate; this does not bypass GOD governance."
+    )]
+    async fn approve_task(
+        &self,
+        Parameters(input): Parameters<TaskIdArgs>,
+    ) -> Result<Json<Value>, String> {
+        value(self.application.approve_task(&input.task_id).await)
+    }
+
+    #[tool(
+        name = "batai_create_worktree",
+        description = "Create or reuse the task's isolated managed Git worktree; the default branch is never used as an agent worktree."
+    )]
+    async fn create_worktree(
+        &self,
+        Parameters(input): Parameters<CreateWorktreeArgs>,
+    ) -> Result<Json<Value>, String> {
+        value(self.application.create_worktree(
+            &input.agent_id,
+            &input.task_id,
+            input.base_ref.as_deref(),
+        ))
+    }
+
+    #[tool(
+        name = "batai_update_directives",
+        description = "Replace an agent's directives through the recoverable Rust file journal and audit trail."
+    )]
+    async fn update_directives(
+        &self,
+        Parameters(input): Parameters<UpdateDirectivesArgs>,
+    ) -> Result<Json<Value>, String> {
+        value(
+            self.application
+                .update_directives(&input.agent_id, &input.content),
+        )
+    }
+
+    #[tool(
+        name = "batai_resume_agent",
+        description = "Ask the Rust task engine to resume tasks waiting for this agent's resource."
+    )]
+    async fn resume_agent(
+        &self,
+        Parameters(input): Parameters<AgentIdArgs>,
+    ) -> Result<Json<Value>, String> {
+        value(self.application.resume_agent(&input.agent_id).await)
+    }
+
+    #[tool(
+        name = "batai_create_github_issue",
+        description = "Request GitHub issue creation through Rust delivery and AuthorityRouter. This may create a GOD decision and never bypasses merge or provider policy."
+    )]
+    async fn create_github_issue(
+        &self,
+        Parameters(input): Parameters<CreateGithubIssueRequest>,
+    ) -> Result<Json<Value>, String> {
+        value(self.application.create_github_issue(input))
+    }
+
+    #[tool(
+        name = "batai_read_director_inbox",
+        description = "Read GOD messages addressed to the Director from the project authority inbox."
+    )]
+    async fn read_director_inbox(
+        &self,
+        Parameters(input): Parameters<ReadInboxArgs>,
+    ) -> Result<Json<Value>, String> {
+        value(
+            self.application
+                .read_director_inbox(input.pending_only.unwrap_or(true)),
+        )
+    }
+
+    #[tool(
+        name = "batai_acknowledge_god_message",
+        description = "Acknowledge one exact GOD message using a recoverable and audited Rust mutation."
+    )]
+    async fn acknowledge_god_message(
+        &self,
+        Parameters(input): Parameters<MessageIdArgs>,
+    ) -> Result<Json<Value>, String> {
+        value(self.application.acknowledge_god_message(&input.message_id))
+    }
+
+    #[tool(
+        name = "batai_request_god_decision",
+        description = "Create a structured GOD decision request through Rust governance. The Director cannot resolve it."
+    )]
+    async fn request_god_decision(
+        &self,
+        Parameters(input): Parameters<DecisionRequest>,
+    ) -> Result<Json<Value>, String> {
+        value(self.application.request_god_decision(input))
+    }
+
+    #[tool(name = "batai_get_task", description = "Read one typed task by ID.")]
+    async fn get_task(
+        &self,
+        Parameters(input): Parameters<TaskIdArgs>,
+    ) -> Result<Json<Value>, String> {
+        value(self.application.get_task(&input.task_id))
+    }
+
+    #[tool(
+        name = "batai_get_resources",
+        description = "Read the governed intelligence resource portfolio without credentials or secret diagnostics."
+    )]
+    async fn get_resources(&self) -> Result<Json<Value>, String> {
+        value(
+            self.application
+                .runtime()
+                .store
+                .list_intelligence_resources(),
+        )
+    }
+
+    #[tool(
+        name = "batai_get_delivery",
+        description = "Read the Rust GitHub delivery checkpoint for a task."
+    )]
+    async fn get_delivery(
+        &self,
+        Parameters(input): Parameters<TaskIdArgs>,
+    ) -> Result<Json<Value>, String> {
+        value(self.application.get_delivery(&input.task_id))
+    }
+
+    #[tool(
+        name = "batai_get_decisions",
+        description = "Read governance decisions and provider approvals from the Rust governance snapshot."
+    )]
+    async fn get_decisions(&self) -> Result<Json<Value>, String> {
+        value(
+            self.application
+                .runtime()
+                .governance
+                .snapshot()
+                .map(|snapshot| {
+                    json!({
+                        "decisions": snapshot.decisions,
+                        "providerApprovals": snapshot.provider_approvals,
+                    })
+                }),
+        )
+    }
+
+    #[tool(
+        name = "batai_get_recovery_state",
+        description = "Read unfinished or review-required recoverable operations; this tool cannot force recovery."
+    )]
+    async fn get_recovery_state(&self) -> Result<Json<Value>, String> {
+        value(
+            self.application
+                .runtime()
+                .governance
+                .snapshot()
+                .map(|snapshot| {
+                    json!({
+                        "operations": snapshot.recovery_operations,
+                        "requiresReview": snapshot.recovery_requires_review,
+                    })
+                }),
+        )
+    }
+}
+
+#[tool_handler(router = self.tool_router)]
+impl ServerHandler for DirectorMcpServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(
+                "Use Batai's governed Rust tools for deterministic orchestration. MCP acts as DIRECTOR, not GOD, and cannot bypass approvals.",
+            )
+            .with_server_info(rmcp::model::Implementation::new("batai-control", env!("CARGO_PKG_VERSION")))
+    }
+}
+
+pub async fn run_stdio(application: Arc<BataiApplication>) -> Result<(), String> {
+    let service = DirectorMcpServer::new(application)
+        .serve(rmcp::transport::stdio())
+        .await
+        .map_err(|error| redact_secrets(&error.to_string()))?;
+    service
+        .waiting()
+        .await
+        .map(|_| ())
+        .map_err(|error| redact_secrets(&error.to_string()))
+}
+
+fn value<T, E>(result: Result<T, E>) -> Result<Json<Value>, String>
+where
+    T: Serialize,
+    E: std::fmt::Display,
+{
+    let output = result.map_err(|error| redact_secrets(&error.to_string()))?;
+    serde_json::to_value(output)
+        .map(Json)
+        .map_err(|error| format!("Result serialization failed: {error}"))
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+struct TaskIdArgs {
+    task_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+struct AgentIdArgs {
+    agent_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+struct MessageIdArgs {
+    message_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+struct CreateWorktreeArgs {
+    agent_id: String,
+    task_id: String,
+    #[serde(default)]
+    base_ref: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+struct UpdateDirectivesArgs {
+    agent_id: String,
+    content: String,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize, JsonSchema)]
+struct ReadInboxArgs {
+    #[serde(default)]
+    pending_only: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::{
+        model::{
+            ClientCapabilities, ClientJsonRpcMessage, Implementation, ProtocolVersion,
+            RequestMetaObject, ServerJsonRpcMessage, ServerResult,
+        },
+        transport::{IntoTransport, Transport},
+        ClientHandler,
+    };
+
+    #[derive(Clone, Default)]
+    struct DiscoveryClient;
+
+    impl ClientHandler for DiscoveryClient {}
+
+    #[test]
+    fn legacy_tool_names_are_preserved_by_the_official_sdk_router() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../specs/control-plane-contract-v1.json"))
+                .expect("contract fixture");
+        let required = fixture["legacyMcpTools"].as_array().expect("tool names");
+        let names = DirectorMcpServer::new(test_application()).tool_names();
+        for name in required {
+            let name = name.as_str().expect("tool name");
+            assert!(
+                names.iter().any(|candidate| candidate == name),
+                "missing {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn official_sdk_preserves_initialize_compatibility() {
+        assert_eq!(negotiate("2025-11-25").await, ProtocolVersion::V_2025_11_25);
+        assert_eq!(negotiate("2026-07-28").await, ProtocolVersion::LATEST);
+    }
+
+    #[tokio::test]
+    async fn official_sdk_exposes_the_current_discover_lifecycle() {
+        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+        let service = DirectorMcpServer::new(test_application());
+        let server = tokio::spawn(async move {
+            let service = service.serve(server_transport).await.expect("serve");
+            let _ = service.waiting().await;
+        });
+        let client = DiscoveryClient
+            .serve(client_transport)
+            .await
+            .expect("connect client");
+        let mut meta = RequestMetaObject::new();
+        meta.set_protocol_version(ProtocolVersion::V_2026_07_28);
+        meta.set_client_info(Implementation::new("batai-test", "1"));
+        meta.set_client_capabilities(ClientCapabilities::default());
+        let discovery = client.discover(meta).await.expect("discover");
+        assert!(discovery
+            .supported_versions
+            .contains(&ProtocolVersion::V_2026_07_28));
+        client.cancel().await.expect("cancel");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn official_sdk_lists_and_calls_safe_legacy_tools() {
+        let (mut client, server) = connected("2025-11-25").await;
+        let _ = client.receive().await.expect("initialize response");
+        client
+            .send(message(json!({
+                "jsonrpc":"2.0","method":"notifications/initialized"
+            })))
+            .await
+            .expect("initialized");
+        client
+            .send(message(json!({
+                "jsonrpc":"2.0","id":2,"method":"tools/list","params":{}
+            })))
+            .await
+            .expect("tools/list");
+        let listed = client.receive().await.expect("tools/list response");
+        let listed = serde_json::to_value(listed).expect("serialize response");
+        assert!(listed.to_string().contains("batai_read_project_state"));
+
+        client
+            .send(message(json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"batai_read_project_state","arguments":{}}
+            })))
+            .await
+            .expect("tools/call");
+        let called = client.receive().await.expect("tools/call response");
+        let called = serde_json::to_value(called).expect("serialize response");
+        assert_eq!(called["result"]["isError"], false);
+        assert!(called["result"]["structuredContent"].is_object());
+        drop(client);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn official_sdk_rejects_unknown_tools_and_invalid_params() {
+        let (mut client, server) = connected("2025-11-25").await;
+        let _ = client.receive().await.expect("initialize response");
+        client
+            .send(message(json!({
+                "jsonrpc":"2.0","method":"notifications/initialized"
+            })))
+            .await
+            .expect("initialized");
+
+        client
+            .send(message(json!({
+                "jsonrpc":"2.0","id":2,"method":"tools/call",
+                "params":{"name":"batai_not_a_tool","arguments":{}}
+            })))
+            .await
+            .expect("unknown tool request");
+        let unknown = client.receive().await.expect("unknown tool response");
+        let unknown = serde_json::to_value(unknown).expect("serialize response");
+        assert!(
+            unknown["error"].is_object() || unknown["result"]["isError"] == true,
+            "unknown tools must produce a protocol or tool error: {unknown}"
+        );
+
+        client
+            .send(message(json!({
+                "jsonrpc":"2.0","id":3,"method":"tools/call",
+                "params":{"name":"batai_approve_task","arguments":{}}
+            })))
+            .await
+            .expect("invalid params request");
+        let invalid = client.receive().await.expect("invalid params response");
+        let invalid = serde_json::to_value(invalid).expect("serialize response");
+        assert!(
+            invalid["error"].is_object() || invalid["result"]["isError"] == true,
+            "invalid parameters must produce a protocol or tool error: {invalid}"
+        );
+        drop(client);
+        server.abort();
+    }
+
+    async fn negotiate(version: &str) -> ProtocolVersion {
+        let (mut client, server) = connected(version).await;
+        let response = client.receive().await.expect("initialize response");
+        let ServerJsonRpcMessage::Response(response) = response else {
+            panic!("expected initialize response");
+        };
+        let ServerResult::InitializeResult(result) = response.result else {
+            panic!("expected initialize result");
+        };
+        drop(client);
+        server.abort();
+        result.protocol_version
+    }
+
+    async fn connected(
+        version: &str,
+    ) -> (
+        impl Transport<rmcp::RoleClient>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+        let service = DirectorMcpServer::new(test_application());
+        let server = tokio::spawn(async move {
+            let service = service.serve(server_transport).await.expect("serve");
+            let _ = service.waiting().await;
+        });
+        let mut client = IntoTransport::<rmcp::RoleClient, _, _>::into_transport(client_transport);
+        client
+            .send(message(json!({
+                "jsonrpc":"2.0","id":1,"method":"initialize",
+                "params":{
+                    "protocolVersion":version,
+                    "capabilities":{},
+                    "clientInfo":{"name":"batai-test","version":"1"}
+                }
+            })))
+            .await
+            .expect("initialize");
+        (client, server)
+    }
+
+    fn message(value: Value) -> ClientJsonRpcMessage {
+        serde_json::from_value(value).expect("valid client message")
+    }
+
+    fn test_application() -> Arc<BataiApplication> {
+        let root = tempfile::tempdir().expect("project").keep();
+        std::fs::create_dir_all(root.join(".batai/tasks")).expect("task directory");
+        BataiApplication::open(root, crate::application::ApplicationMode::Mcp).expect("application")
+    }
+}

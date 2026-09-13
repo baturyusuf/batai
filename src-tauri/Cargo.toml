@@ -18,11 +18,18 @@ notify = "8.2.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "process", "io-util", "io-std", "net", "signal"] }
 uuid = { version = "1", features = ["v4"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sysinfo = "0.33"
 keyring = { version = "3", default-features = false, features = ["windows-native", "apple-native", "sync-secret-service"] }
+axum = { version = "0.8", features = ["json", "http1", "tokio"] }
+tower = { version = "0.5", features = ["util"] }
+fs2 = "0.4"
+rust-embed = "8"
+mime_guess = "2"
+rmcp = { version = "3.3.0", features = ["server", "client", "transport-io", "transport-worker"] }
+schemars = "1"
 
 [dev-dependencies]
 tempfile = "3"

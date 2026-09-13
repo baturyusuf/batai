@@ -1286,7 +1286,7 @@ fn mark_remote_review(store: &RuntimeStore, journal: &mut RemoteOperationJournal
 }
 
 impl DeliveryCheckpoint {
-    fn binding(&self) -> WorktreeBinding {
+    pub(crate) fn binding(&self) -> WorktreeBinding {
         WorktreeBinding {
             path: PathBuf::from(&self.worktree_path),
             branch: self.branch.clone(),

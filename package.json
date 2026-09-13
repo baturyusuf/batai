@@ -5,15 +5,17 @@
   "type": "module",
   "description": "Director-managed, cost-aware heterogeneous AI developer organization runtime.",
   "scripts": {
-    "start": "node src/server.mjs",
-    "desktop:dev": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "start": "cargo run --quiet --manifest-path src-tauri/Cargo.toml --bin batai-control -- serve",
+    "desktop:dev": "cargo run --manifest-path src-tauri/Cargo.toml --bin batai",
     "desktop:build": "cargo build --manifest-path src-tauri/Cargo.toml",
     "demo:init": "node scripts/init-demo.mjs",
     "test": "node --test --test-reporter=spec",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:all": "npm test && npm run test:rust",
     "test:watch": "node --test --watch",
-    "mcp": "node src/control/mcp-server.mjs"
+    "mcp": "cargo run --quiet --manifest-path src-tauri/Cargo.toml --bin batai-control -- mcp",
+    "start:node-reference": "node src/server.mjs",
+    "mcp:node-reference": "node src/control/mcp-server.mjs"
   },
   "engines": {
     "node": ">=22.5.0"

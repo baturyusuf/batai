@@ -2051,25 +2051,7 @@ impl GovernanceService {
         read_json_or_default(&self.root.join(".batai/policies.json"))
     }
 
-    fn persist_agent(&self, agent: &Agent) -> Result<()> {
-        let path = self
-            .root
-            .join(".batai/agents")
-            .join(&agent.id)
-            .join("config.json");
-        let previous = fs::read(&path).ok();
-        atomic_json(&path, agent)?;
-        if let Err(error) = self.agents.register(agent) {
-            restore_file(&path, previous.as_deref())?;
-            return Err(error);
-        }
-        Ok(())
-    }
-
-    fn persist_organization(&self, organization: &OrganizationDocument) -> Result<()> {
-        atomic_json(&self.root.join(".batai/organization.json"), organization)
-    }
-
+    #[cfg(test)]
     fn persist_policy(&self, policy: &ProjectGovernancePolicy) -> Result<()> {
         atomic_json(&self.root.join(".batai/policies.json"), policy)
     }
@@ -2425,20 +2407,6 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> Result<()> {
         fs::remove_file(backup)?;
     }
     Ok(())
-}
-
-fn restore_file(path: &Path, previous: Option<&[u8]>) -> Result<()> {
-    match previous {
-        Some(bytes) => {
-            let value: Value = serde_json::from_slice(bytes)?;
-            atomic_json(path, &value)
-        }
-        None if path.exists() => {
-            fs::remove_file(path)?;
-            Ok(())
-        }
-        None => Ok(()),
-    }
 }
 
 fn now() -> String {

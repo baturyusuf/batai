@@ -1,6 +1,6 @@
 # Node retirement inventory
 
-The Rust/Tauri desktop no longer needs the Node GitHub wrapper for production delivery. Node is retained as an explicit compatibility server, MCP boundary and migration test specification until the remaining entry points have Rust parity. Files are not deleted merely because an equivalent exists.
+Desktop, HTTP and MCP production control surfaces are now Rust-native and share one `BataiApplication` kernel. Node is retained only as a compatibility-test oracle, deprecated reference implementation and legacy unit-test specification. Files are not deleted merely because an equivalent exists.
 
 | Node module | Status | Rust parity | Production desktop dependency |
 |---|---|---|---|
@@ -10,11 +10,11 @@ The Rust/Tauri desktop no longer needs the Node GitHub wrapper for production de
 | `core/task-engine.mjs` | COMPATIBILITY_TEST | Rust tasks, checkpoints, delivery sub-state and scheduler | No |
 | `core/session-manager.mjs` | COMPATIBILITY_TEST | Rust provider sessions and recovery | No |
 | `core/resource-manager.mjs` | COMPATIBILITY_TEST | Rust resource portfolio and quota scheduling | No |
-| `core/director-tools.mjs` | STILL_REQUIRED | Most deterministic operations exist in Rust/Tauri; Node MCP still imports this module | No; yes for `npm run mcp` |
-| `core/batai-runtime.mjs` | STILL_REQUIRED | Rust desktop runtime is primary; Node HTTP/MCP compatibility entry points still construct this runtime | No; yes for `npm start` and `npm run mcp` |
-| `server.mjs` | STILL_REQUIRED | Compatibility HTTP server only | No |
-| `control/mcp-server.mjs` | STILL_REQUIRED | Rust delivery commands exist, but the published Director MCP stdio process is still Node | No; yes for Node MCP |
+| `core/director-tools.mjs` | COMPATIBILITY_TEST | `BataiApplication` Director operations call Rust governance/tasks/worktrees/delivery | No |
+| `core/batai-runtime.mjs` | COMPATIBILITY_TEST | Rust `BataiRuntime` is the only production runtime | No |
+| `server.mjs` | DEPRECATED_REFERENCE | Rust loopback HTTP router, validation, embedded UI and shared snapshot | No |
+| `control/mcp-server.mjs` | DEPRECATED_REFERENCE | Official Rust `rmcp` stdio server with legacy tool names | No |
 
 ## Removal gate
 
-Node removal remains blocked until the public HTTP and MCP entry points are redirected to Rust (or formally retired), their compatibility fixtures are preserved, and no documented workflow calls `npm start` or `npm run mcp`. The desktop’s GitHub lifecycle, governance, tasks, sessions, resources and recovery are already Rust-native. `.batai` compatibility and the Node tests remain required during the transition.
+The production retirement gate is satisfied: the desktop, HTTP, MCP, GitHub, authority, tasks, sessions and resources are Rust-native; production scripts do not spawn Node; `.batai` remains compatible. `src/server.mjs` and `src/control/mcp-server.mjs` stay temporarily so Node compatibility tests can compare the frozen fixture and downstream users have a readable migration oracle. Their explicit `*:node-reference` scripts are not production paths. Removing the wider Node implementation and its migration tests is a separate cleanup after one compatibility release.

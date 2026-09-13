@@ -37,20 +37,20 @@ async function loadSnapshot() {
   const state = await response.json();
   const tasks = (state.tasks ?? []).map(task => ({
     id:task.id, objective:task.objective, status:task.status,
-    assignedTo:task.assigned_to ?? [], dependencies:task.dependencies ?? [], weight:task.weight ?? 1,
+    assignedTo:task.assignedTo ?? task.assigned_to ?? [], dependencies:task.dependencies ?? [], weight:task.weight ?? 1,
     progress:task.progress ?? ({COMPLETED:1,REVIEW:.9,RUNNING:.55,WAITING_RESOURCE:.4,BLOCKED:.25}[task.status] ?? 0)
   }));
   const agents = (state.agents ?? []).map(agent => ({
     id:agent.id, name:agent.name, title:agent.title ?? agent.role_template,
     department:agent.department ? departmentLabel(agent.department) : 'Unspecified', seniority:agent.seniority ?? null,
     level:agent.level ?? null, function:agent.function ?? 'GENERIC_SOFTWARE_AGENT',
-    reportsTo:agent.reports_to ?? agent.parent_agent_id, directReports:agent.direct_reports ?? [],
-    provider:agent.provider, model:agent.model, reasoningEffort:agent.reasoning_effort,
-    authMode:agent.auth_mode, status:agent.status, activity:agent.activity ?? 'IDLE',
-    currentTaskId:agent.current_task_id, currentTaskObjective:agent.current_task_objective,
+    reportsTo:agent.reportsTo ?? agent.reports_to ?? agent.parent_agent_id, directReports:agent.directReports ?? agent.direct_reports ?? [],
+    provider:agent.provider, model:agent.model, reasoningEffort:agent.reasoningEffort ?? agent.reasoning_effort,
+    authMode:agent.authMode ?? agent.auth_mode, status:agent.status, activity:agent.activity ?? 'IDLE',
+    currentTaskId:agent.currentTaskId ?? agent.current_task_id, currentTaskObjective:agent.currentTaskObjective ?? agent.current_task_objective,
     worktree:agent.worktree, performance:agent.performance ?? {}, usage:agent.usage ?? {}
     ,lifecycle:agent.lifecycle ?? 'TASK_SCOPED', authority:agent.authority ?? 'WORKER',
-    permissions:agent.permissions ?? [], intelligencePolicy:agent.intelligence_policy ?? {}, history:agent.history ?? []
+    permissions:agent.permissions ?? [], intelligencePolicy:agent.intelligencePolicy ?? agent.intelligence_policy ?? {}, history:agent.history ?? []
   }));
   const total = tasks.reduce((sum, task) => sum + task.weight, 0);
   const progress = total ? Math.round(tasks.reduce((sum, task) => sum + task.weight * task.progress, 0) / total * 1000) / 10 : 0;

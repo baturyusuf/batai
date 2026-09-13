@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "legacyHttpRoutes": [
+    "GET /api/state",
+    "GET /api/providers",
+    "POST /api/agents",
+    "POST /api/tasks",
+    "POST /api/god/messages",
+    "POST /api/decisions",
+    "POST /api/decisions/:id/resolve",
+    "POST /api/tasks/:id/approve",
+    "GET /api/health"
+  ],
+  "legacyMcpTools": [
+    "batai_create_agent",
+    "batai_assign_task",
+    "batai_read_project_state",
+    "batai_approve_task",
+    "batai_create_worktree",
+    "batai_update_directives",
+    "batai_resume_agent",
+    "batai_create_github_issue",
+    "batai_read_director_inbox",
+    "batai_acknowledge_god_message",
+    "batai_request_god_decision"
+  ],
+  "intentionalSecurityChanges": [
+    "HTTP mutations require a local bearer token unless BATAI_LEGACY_HTTP_MUTATIONS=1",
+    "Host and Origin must resolve to loopback authorities",
+    "JSON request bodies are limited to 1 MiB",
+    "MCP Director calls pass through Rust authority and cannot impersonate GOD",
+    "MCP protocol negotiation is performed by the official Rust SDK"
+  ]
+}

@@ -1,17 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod domain;
-#[allow(dead_code)]
-mod project;
-mod providers;
-#[allow(dead_code)]
-mod runtime;
-
+use batai::{
+    application::{ApplicationMode, BataiApplication},
+    domain, project, providers, runtime,
+};
 use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 use tauri::Emitter;
 
 use domain::{AppSnapshot, ConnectionGuide, MessageReceipt, ProviderConnection};
-use project::{discover_project_root, ProjectStore};
+use project::discover_project_root;
 use runtime::delivery::{DeliveryCheckpoint, DeliveryPolicy, ExternalLink};
 use runtime::governance::{
     Actor, AuthorityScope, ManualCapabilityEdit, MutationRequest, MutationResult, ProviderApproval,
@@ -20,14 +17,17 @@ use runtime::governance::{
 use runtime::recovery::{OperationJournal, RecoveryAction};
 
 struct AppState {
-    project: ProjectStore,
+    application: std::sync::Arc<BataiApplication>,
     runtime: std::sync::Arc<runtime::BataiRuntime>,
     ollama_pulls: Mutex<HashMap<String, providers::ollama::PullCancellation>>,
 }
 
 #[tauri::command]
 fn get_app_snapshot(state: tauri::State<'_, AppState>) -> Result<AppSnapshot, String> {
-    state.runtime.snapshot().map_err(|error| error.to_string())
+    state
+        .application
+        .snapshot()
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -438,8 +438,8 @@ fn send_director_message(
     state: tauri::State<'_, AppState>,
 ) -> Result<MessageReceipt, String> {
     state
-        .project
-        .send_director_message(&content)
+        .application
+        .send_god_message(&content)
         .map_err(|error| error.to_string())
 }
 
@@ -702,13 +702,14 @@ fn main() {
         .or_else(|| std::env::current_dir().ok().map(discover_project_root))
         .unwrap_or_else(|| PathBuf::from("."));
 
-    let runtime =
-        runtime::BataiRuntime::open(project_root.clone()).expect("failed to open Batai runtime");
-    tauri::async_runtime::block_on(runtime.start()).expect("failed to start Batai runtime");
+    let application = BataiApplication::open(project_root.clone(), ApplicationMode::Desktop)
+        .expect("failed to open Batai application");
+    tauri::async_runtime::block_on(application.start()).expect("failed to start Batai runtime");
+    let runtime = application.runtime().clone();
 
     let app = tauri::Builder::default()
         .manage(AppState {
-            project: ProjectStore::new(project_root),
+            application: application.clone(),
             runtime: runtime.clone(),
             ollama_pulls: Mutex::new(HashMap::new()),
         })
@@ -767,5 +768,5 @@ fn main() {
         }
     });
     app.run(|_, _| {});
-    tauri::async_runtime::block_on(runtime.shutdown()).expect("failed to stop Batai runtime");
+    tauri::async_runtime::block_on(application.shutdown()).expect("failed to stop Batai runtime");
 }

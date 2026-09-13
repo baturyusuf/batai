@@ -21,15 +21,16 @@
 - Mock provider
 - Ollama provider adapter
 - Quota reset parser
-- Web control plane
-- HTTP control-plane validation for malformed JSON and invalid payloads
+- Rust-native loopback HTTP control plane with legacy routes, typed validation, embedded UI, mutation token, Host/Origin defense and bounded bodies
+- Official Rust SDK-based Director MCP stdio control plane with structured output and legacy tool names
+- Shared `BataiApplication` kernel and OS-backed exclusive project runtime ownership across desktop/HTTP/MCP
 
-Automated compatibility/UI suite: **39 passing Node tests** at the time of this snapshot.
+Automated suites at the time of this snapshot: **170 passing Rust tests** and **41 passing Node compatibility/UI tests**.
 
 ## Implemented and smoke-tested at protocol/process level
 
-- Director MCP-compatible stdio control server
-- HTTP control plane API
+- Rust Director MCP stdio control server (`rmcp`), including 2025-11-25 initialize compatibility and current discover lifecycle
+- Rust HTTP control plane API and Node-less binary smoke
 - GOD Console API
 - Decision Ledger API
 
@@ -95,11 +96,11 @@ Automated compatibility/UI suite: **39 passing Node tests** at the time of this 
 - Capability Evidence, Router Calibration, Routing History and replay views; connection smoke remains connectivity-only and Z.AI warning acknowledgement does not bypass terms eligibility.
 - Rust-native GitHub delivery with official `gh` authentication/repository binding, typed issues/PRs/reviews/checks, issue-task links, isolated commit/push, PR idempotence, durable CI refresh, SHA-bound merge governance and remote saga recovery.
 - Task delivery timeline and PR inspector with explicit merge controls; required delivery pauses task completion until a merged PR is observed.
-- Node GitHub and worktree wrappers are no longer used by the production desktop; the Node HTTP/MCP entry points remain a compatibility boundary documented in `NODE_RETIREMENT.md`.
-- One hundred fifty-six passing Rust tests, including local bare-remote delivery, duplicate import/PR, exact issue-marker recovery, CI invalidation and crash reconciliation coverage.
+- Node GitHub/worktree/HTTP/MCP code is no longer used by production entry points; remaining Node files are compatibility-test references documented in `NODE_RETIREMENT.md`.
+- One hundred sixty-nine Rust library tests, including HTTP security, official MCP lifecycle/tool calls and exclusive project ownership in addition to delivery/runtime coverage.
 - Manual UI smoke at 1440x900 and 1100x720 with no JavaScript console errors.
 
-The Node HTTP/MCP control plane remains as a compatibility layer; the production Rust desktop GitHub lifecycle no longer depends on it.
+The external production control plane is Rust-native. Node remains only for compatibility fixtures and migration tests.
 
 ## Next engineering milestones
 
@@ -107,5 +108,5 @@ The Node HTTP/MCP control plane remains as a compatibility layer; the production
 2. Implement meeting scheduling, event-derived temporary graph groups and automatic safe summaries on the typed meeting foundation.
 3. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
 4. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.
-5. Redirect the published Node HTTP/MCP entry points to the Rust command surface, then remove the compatibility runtime after parity.
+5. After one compatibility release, remove deprecated Node HTTP/MCP reference files and split the remaining Node migration suite from release packaging.
 6. Add native editor/LSP/terminal integration beyond the workspace scaffold.

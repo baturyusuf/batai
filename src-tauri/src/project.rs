@@ -168,10 +168,6 @@ fn text(value: &Value, key: &str, fallback: &str) -> String {
         .to_string()
 }
 
-fn optional_text(value: &Value, key: &str) -> Option<String> {
-    value.get(key).and_then(Value::as_str).map(str::to_string)
-}
-
 fn string_list(value: &Value, key: &str) -> Vec<String> {
     value
         .get(key)

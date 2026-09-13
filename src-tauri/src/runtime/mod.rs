@@ -64,12 +64,19 @@ pub struct BataiRuntime {
 
 impl BataiRuntime {
     pub fn open(root: PathBuf) -> Result<Arc<Self>> {
+        Self::open_with_interactive_approvals(root, true)
+    }
+
+    pub fn open_with_interactive_approvals(
+        root: PathBuf,
+        interactive_approvals: bool,
+    ) -> Result<Arc<Self>> {
         let store = RuntimeStore::open(root.join(".runtime/runtime.sqlite"))?;
         let events = EventEngine::new(store.clone());
         let agents = AgentRegistry::new(store.clone(), events.clone());
         let governance =
             GovernanceService::new(root.clone(), store.clone(), agents.clone(), events.clone());
-        governance.set_interactive_approvals(true);
+        governance.set_interactive_approvals(interactive_approvals);
         let mock = Arc::new(MockProvider::default());
         let mut providers = HashMap::<String, Arc<dyn ExecutionProvider>>::new();
         providers.insert("mock".into(), mock);

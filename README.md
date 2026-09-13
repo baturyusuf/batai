@@ -2,7 +2,7 @@
 
 **Batai** is a Director-managed, cost-aware runtime for heterogeneous AI developer teams.
 
-> The `codex/rust-rewrite` branch contains the Rust/Tauri desktop and deterministic execution/runtime/delivery control plane. Node remains temporarily for the compatibility HTTP server and Director MCP entry point.
+> The `codex/rust-rewrite` branch contains the Rust/Tauri desktop and a Rust-native HTTP/MCP/runtime/delivery control plane. Node remains only as a compatibility-test reference.
 
 The core idea is that the **Director AI operates the organization through Batai tools**. Batai itself stays deterministic wherever possible: task routing, dependencies, events, worktrees, quota waiting, session recovery and authority state should not spend LLM turns.
 
@@ -34,7 +34,7 @@ The core idea is that the **Director AI operates the organization through Batai 
 - Ollama local-model adapter
 - Mock provider for deterministic tests
 - Rust-native GitHub delivery through the official authenticated `gh` CLI: issue↔task links, isolated commit/push, PR/review/CI state, SHA-bound merge governance and restart reconciliation
-- MCP-compatible Director control server
+- Official Rust SDK-based MCP Director control server and secure loopback HTTP API, both using the same Rust application kernel as the desktop
 - Live node-edge Organization Map with Hierarchy, Workflow and Combined modes, semantic edges, search, filters, pan/zoom and Agent Inspector
 - Organization Edit mode, Agent Factory form, GOD decisions, exact live provider approvals, recovery queue and project policy settings
 - Resource Dashboard with provider health, usage source, quota, token and provider-reported cost summaries
@@ -50,7 +50,7 @@ The core idea is that the **Director AI operates the organization through Batai 
 
 ## Run the tested control plane
 
-Requires Node.js 22.5+.
+The production control plane requires Rust; Node.js 22.5+ is needed only for the compatibility test suite.
 
 ```bash
 npm test
@@ -63,7 +63,7 @@ Open:
 http://127.0.0.1:4317
 ```
 
-The core currently has no npm runtime dependencies; it uses Node built-ins, including Node 22 SQLite.
+`npm start` is a convenience alias for `batai-control serve`. Mutations require a bearer token supplied through `BATAI_CONTROL_TOKEN`; read-only health/state remain loopback-local. Direct native usage is documented in [Control Plane](docs/CONTROL_PLANE.md).
 
 ## Run the Rust desktop
 
@@ -89,8 +89,10 @@ The test creates its own disposable Git repository and managed worktree; it veri
 ## Director MCP server
 
 ```bash
-BATAI_PROJECT_ROOT=/path/to/project npm run mcp
+BATAI_PROJECT_ROOT=/path/to/project cargo run --quiet --manifest-path src-tauri/Cargo.toml --bin batai-control -- mcp
 ```
+
+For npm-based development use `npm run --silent mcp`; MCP clients should launch the native `batai-control mcp` binary directly so stdout contains protocol frames only.
 
 Director tools currently include:
 
@@ -105,6 +107,8 @@ Director tools currently include:
 - `batai_read_director_inbox`
 - `batai_acknowledge_god_message`
 - `batai_request_god_decision`
+
+The server uses the official Rust MCP SDK, supports current discovery plus 2025-11-25 initialize compatibility, and executes as Director through Rust authority checks. It does not construct a Node runtime.
 
 ## Project model
 
@@ -178,7 +182,7 @@ tests/          orchestration/provider tests
 - Crash recovery preserves provider/session/worktree evidence and requires review after an uncertain provider mutation; it does not reattach to an independently surviving OS process.
 - Interactive Codex approvals pause the exact live request for bounded `Allow once`/`Deny` input. Headless, unsafe, expired and restarted requests fail closed; no blanket authorization is cached.
 - Cross-store organization mutations use a durable operation journal with forward completion, safe rollback and fingerprint-conflict review. Batai does not claim distributed ACID across the filesystem and SQLite.
-- The Node HTTP server and Director MCP stdio entry point remain compatibility surfaces; their retirement matrix is tracked in [Node Retirement](docs/NODE_RETIREMENT.md).
+- Deprecated Node HTTP/MCP files remain only as compatibility-test references; production scripts and release binaries use Rust. See [Control Plane](docs/CONTROL_PLANE.md) and [Node Retirement](docs/NODE_RETIREMENT.md).
 - Runtime events expose observable execution trace, not hidden model reasoning. Fine-grained activities such as reading versus testing remain generic when a provider does not report them.
 - Subscription quota remains Unknown when no official quota endpoint is available; plan prices are user-supplied reporting data and never hard-coded as routing truth.
 - Offline replay can show a policy's alternative selection but cannot know whether that unexecuted resource would have succeeded or saved money; production exploration and automatic calibration are disabled.
