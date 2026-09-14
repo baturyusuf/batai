@@ -36,6 +36,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ApplicationMode {
+    Daemon,
     Desktop,
     Http,
     Mcp,
@@ -44,6 +45,7 @@ pub enum ApplicationMode {
 impl ApplicationMode {
     fn label(self) -> &'static str {
         match self {
+            Self::Daemon => "daemon",
             Self::Desktop => "desktop",
             Self::Http => "serve",
             Self::Mcp => "mcp",
@@ -109,11 +111,17 @@ pub struct BataiApplication {
 
 impl BataiApplication {
     pub fn open(root: PathBuf, mode: ApplicationMode) -> Result<Arc<Self>> {
+        if !cfg!(test) && mode != ApplicationMode::Daemon {
+            return Err(RuntimeError::Governance(
+                "desktop, HTTP and MCP are daemon clients; only daemon mode may own BataiApplication"
+                    .into(),
+            ));
+        }
         let root = root.canonicalize().unwrap_or(root);
         let owner = Arc::new(ProjectRuntimeLock::acquire(&root, mode)?);
         let runtime = BataiRuntime::open_with_interactive_approvals(
             root.clone(),
-            mode == ApplicationMode::Desktop,
+            mode == ApplicationMode::Daemon,
         )?;
         Ok(Arc::new(Self {
             root,

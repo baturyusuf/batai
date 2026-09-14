@@ -72,6 +72,58 @@ impl RuntimeStore {
         )?)
     }
 
+    pub fn rpc_mutation_result(&self, request_id: &str) -> Result<Option<Value>> {
+        let raw: Option<String> = self
+            .db()?
+            .query_row(
+                "SELECT result_json FROM rpc_mutation_results WHERE request_id=?",
+                [request_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
+    }
+
+    /// Claims a client mutation before invoking it. A surviving APPLYING marker
+    /// means the previous response was lost and the operation must not be
+    /// replayed blindly.
+    pub fn begin_rpc_mutation(&self, request_id: &str, origin: &str, method: &str) -> Result<bool> {
+        let changed = self.db()?.execute(
+            "INSERT OR IGNORE INTO rpc_mutation_results(request_id,origin,method,result_json,created_at) VALUES(?,?,?,?,?)",
+            params![
+                request_id,
+                origin,
+                method,
+                r#"{"__rpcState":"APPLYING"}"#,
+                now()
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    pub fn save_rpc_mutation_result(
+        &self,
+        request_id: &str,
+        origin: &str,
+        method: &str,
+        result: &Value,
+    ) -> Result<()> {
+        self.db()?.execute(
+            "UPDATE rpc_mutation_results SET origin=?,method=?,result_json=? WHERE request_id=?",
+            params![origin, method, serde_json::to_string(result)?, request_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_rpc_mutation(&self, request_id: &str) -> Result<()> {
+        self.db()?.execute(
+            "DELETE FROM rpc_mutation_results WHERE request_id=?",
+            [request_id],
+        )?;
+        Ok(())
+    }
+
     pub fn upsert_external_link(&self, link: &ExternalLink) -> Result<()> {
         self.db()?.execute(
             r#"INSERT INTO external_links(id,task_id,provider,repository,entity_type,entity_number,url,link_json,created_at,updated_at)

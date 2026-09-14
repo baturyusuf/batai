@@ -16,21 +16,59 @@ use crate::{
         BataiApplication, CreateGithubIssueRequest, DecisionRequest, LegacyAssignTask,
         LegacyCreateAgent,
     },
+    daemon::{ClientOrigin, ControlService, DaemonClient},
     providers::process_supervisor::redact_secrets,
 };
 
 #[derive(Clone)]
 pub struct DirectorMcpServer {
-    application: Arc<BataiApplication>,
+    backend: McpBackend,
     tool_router: ToolRouter<Self>,
+}
+
+#[derive(Clone)]
+enum McpBackend {
+    Application(Arc<ControlService>),
+    Daemon(Arc<tokio::sync::RwLock<DaemonClient>>),
 }
 
 impl DirectorMcpServer {
     pub fn new(application: Arc<BataiApplication>) -> Self {
         Self {
-            application,
+            backend: McpBackend::Application(Arc::new(ControlService::new(application))),
             tool_router: Self::tool_router(),
         }
+    }
+
+    pub fn from_daemon(client: DaemonClient) -> Self {
+        Self {
+            backend: McpBackend::Daemon(Arc::new(tokio::sync::RwLock::new(client))),
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    async fn invoke<T: Serialize>(&self, method: &str, input: T) -> Result<Json<Value>, String> {
+        let params = serde_json::to_value(input).map_err(|error| error.to_string())?;
+        let result = match &self.backend {
+            McpBackend::Application(service) => {
+                service.invoke(ClientOrigin::Mcp, method, params).await
+            }
+            McpBackend::Daemon(client) => {
+                let current = client.read().await.clone();
+                match current.call_value(method, params).await {
+                    Ok(value) => Ok(value),
+                    Err(error) => {
+                        // Reconnect for subsequent MCP calls, but never replay the
+                        // current request: its mutation outcome may be uncertain.
+                        if let Ok(reconnected) = current.reconnect().await {
+                            *client.write().await = reconnected;
+                        }
+                        Err(error)
+                    }
+                }
+            }
+        }?;
+        Ok(Json(result))
     }
 
     pub fn tool_names(&self) -> Vec<String> {
@@ -55,7 +93,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<LegacyCreateAgent>,
     ) -> Result<Json<Value>, String> {
-        value(self.application.create_agent(input))
+        self.invoke("batai_create_agent", input).await
     }
 
     #[tool(
@@ -66,7 +104,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<LegacyAssignTask>,
     ) -> Result<Json<Value>, String> {
-        value(self.application.assign_task(input).await)
+        self.invoke("batai_assign_task", input).await
     }
 
     #[tool(
@@ -74,7 +112,7 @@ impl DirectorMcpServer {
         description = "Read the same secret-filtered Rust application snapshot used by the desktop and HTTP control plane."
     )]
     async fn read_project_state(&self) -> Result<Json<Value>, String> {
-        value(self.application.external_snapshot())
+        self.invoke("batai_read_project_state", json!({})).await
     }
 
     #[tool(
@@ -85,7 +123,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<TaskIdArgs>,
     ) -> Result<Json<Value>, String> {
-        value(self.application.approve_task(&input.task_id).await)
+        self.invoke("batai_approve_task", input).await
     }
 
     #[tool(
@@ -96,11 +134,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<CreateWorktreeArgs>,
     ) -> Result<Json<Value>, String> {
-        value(self.application.create_worktree(
-            &input.agent_id,
-            &input.task_id,
-            input.base_ref.as_deref(),
-        ))
+        self.invoke("batai_create_worktree", input).await
     }
 
     #[tool(
@@ -111,10 +145,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<UpdateDirectivesArgs>,
     ) -> Result<Json<Value>, String> {
-        value(
-            self.application
-                .update_directives(&input.agent_id, &input.content),
-        )
+        self.invoke("batai_update_directives", input).await
     }
 
     #[tool(
@@ -125,7 +156,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<AgentIdArgs>,
     ) -> Result<Json<Value>, String> {
-        value(self.application.resume_agent(&input.agent_id).await)
+        self.invoke("batai_resume_agent", input).await
     }
 
     #[tool(
@@ -136,7 +167,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<CreateGithubIssueRequest>,
     ) -> Result<Json<Value>, String> {
-        value(self.application.create_github_issue(input))
+        self.invoke("batai_create_github_issue", input).await
     }
 
     #[tool(
@@ -147,10 +178,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<ReadInboxArgs>,
     ) -> Result<Json<Value>, String> {
-        value(
-            self.application
-                .read_director_inbox(input.pending_only.unwrap_or(true)),
-        )
+        self.invoke("batai_read_director_inbox", input).await
     }
 
     #[tool(
@@ -161,7 +189,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<MessageIdArgs>,
     ) -> Result<Json<Value>, String> {
-        value(self.application.acknowledge_god_message(&input.message_id))
+        self.invoke("batai_acknowledge_god_message", input).await
     }
 
     #[tool(
@@ -172,7 +200,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<DecisionRequest>,
     ) -> Result<Json<Value>, String> {
-        value(self.application.request_god_decision(input))
+        self.invoke("batai_request_god_decision", input).await
     }
 
     #[tool(name = "batai_get_task", description = "Read one typed task by ID.")]
@@ -180,7 +208,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<TaskIdArgs>,
     ) -> Result<Json<Value>, String> {
-        value(self.application.get_task(&input.task_id))
+        self.invoke("batai_get_task", input).await
     }
 
     #[tool(
@@ -188,12 +216,7 @@ impl DirectorMcpServer {
         description = "Read the governed intelligence resource portfolio without credentials or secret diagnostics."
     )]
     async fn get_resources(&self) -> Result<Json<Value>, String> {
-        value(
-            self.application
-                .runtime()
-                .store
-                .list_intelligence_resources(),
-        )
+        self.invoke("batai_get_resources", json!({})).await
     }
 
     #[tool(
@@ -204,7 +227,7 @@ impl DirectorMcpServer {
         &self,
         Parameters(input): Parameters<TaskIdArgs>,
     ) -> Result<Json<Value>, String> {
-        value(self.application.get_delivery(&input.task_id))
+        self.invoke("batai_get_delivery", input).await
     }
 
     #[tool(
@@ -212,18 +235,7 @@ impl DirectorMcpServer {
         description = "Read governance decisions and provider approvals from the Rust governance snapshot."
     )]
     async fn get_decisions(&self) -> Result<Json<Value>, String> {
-        value(
-            self.application
-                .runtime()
-                .governance
-                .snapshot()
-                .map(|snapshot| {
-                    json!({
-                        "decisions": snapshot.decisions,
-                        "providerApprovals": snapshot.provider_approvals,
-                    })
-                }),
-        )
+        self.invoke("batai_get_decisions", json!({})).await
     }
 
     #[tool(
@@ -231,18 +243,7 @@ impl DirectorMcpServer {
         description = "Read unfinished or review-required recoverable operations; this tool cannot force recovery."
     )]
     async fn get_recovery_state(&self) -> Result<Json<Value>, String> {
-        value(
-            self.application
-                .runtime()
-                .governance
-                .snapshot()
-                .map(|snapshot| {
-                    json!({
-                        "operations": snapshot.recovery_operations,
-                        "requiresReview": snapshot.recovery_requires_review,
-                    })
-                }),
-        )
+        self.invoke("batai_get_recovery_state", json!({})).await
     }
 }
 
@@ -258,7 +259,15 @@ impl ServerHandler for DirectorMcpServer {
 }
 
 pub async fn run_stdio(application: Arc<BataiApplication>) -> Result<(), String> {
-    let service = DirectorMcpServer::new(application)
+    run_server(DirectorMcpServer::new(application)).await
+}
+
+pub async fn run_stdio_bridge(client: DaemonClient) -> Result<(), String> {
+    run_server(DirectorMcpServer::from_daemon(client)).await
+}
+
+async fn run_server(server: DirectorMcpServer) -> Result<(), String> {
+    let service = server
         .serve(rmcp::transport::stdio())
         .await
         .map_err(|error| redact_secrets(&error.to_string()))?;
@@ -267,17 +276,6 @@ pub async fn run_stdio(application: Arc<BataiApplication>) -> Result<(), String>
         .await
         .map(|_| ())
         .map_err(|error| redact_secrets(&error.to_string()))
-}
-
-fn value<T, E>(result: Result<T, E>) -> Result<Json<Value>, String>
-where
-    T: Serialize,
-    E: std::fmt::Display,
-{
-    let output = result.map_err(|error| redact_secrets(&error.to_string()))?;
-    serde_json::to_value(output)
-        .map(Json)
-        .map_err(|error| format!("Result serialization failed: {error}"))
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]

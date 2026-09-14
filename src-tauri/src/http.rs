@@ -28,6 +28,7 @@ pub struct HttpState {
     application: Arc<BataiApplication>,
     control_token: Arc<str>,
     allow_legacy_unauthenticated_mutations: bool,
+    runtime_status: Arc<dyn Fn() -> String + Send + Sync>,
 }
 
 impl HttpState {
@@ -40,7 +41,16 @@ impl HttpState {
             application,
             control_token: control_token.into(),
             allow_legacy_unauthenticated_mutations,
+            runtime_status: Arc::new(|| "READY".into()),
         }
+    }
+
+    pub fn with_runtime_status_provider(
+        mut self,
+        provider: Arc<dyn Fn() -> String + Send + Sync>,
+    ) -> Self {
+        self.runtime_status = provider;
+        self
     }
 
     pub fn generated(application: Arc<BataiApplication>) -> Self {
@@ -304,8 +314,16 @@ fn json_rejection(error: axum::extract::rejection::JsonRejection) -> ApiError {
     }
 }
 
-async fn health() -> Json<Value> {
-    Json(json!({"status":"ok","runtime":"rust","controlPlane":"batai"}))
+async fn health(State(state): State<HttpState>) -> Json<Value> {
+    let runtime = (state.runtime_status)();
+    Json(json!({
+        "ok": true,
+        "status": "ok",
+        "runtime": runtime,
+        "runtimeEngine": "rust",
+        "owner": "daemon",
+        "controlPlane": "batai"
+    }))
 }
 
 async fn state_snapshot(State(state): State<HttpState>) -> Result<Json<Value>, ApiError> {

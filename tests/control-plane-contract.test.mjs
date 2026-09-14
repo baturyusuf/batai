@@ -21,6 +21,17 @@ test('production convenience scripts launch the Rust control plane', () => {
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.match(pkg.scripts.start, /batai-control -- serve/);
   assert.match(pkg.scripts.mcp, /batai-control -- mcp/);
+  assert.match(pkg.scripts.daemon, /batai-control -- daemon/);
   assert.doesNotMatch(pkg.scripts.start, /node src\/server\.mjs/);
   assert.doesNotMatch(pkg.scripts.mcp, /node src\/control\/mcp-server\.mjs/);
+});
+
+test('desktop exposes daemon connection and recovery states', () => {
+  const html = fs.readFileSync(path.join(root, 'src/ui/index.html'), 'utf8');
+  const app = fs.readFileSync(path.join(root, 'src/ui/app.js'), 'utf8');
+  assert.match(html, /data-state="STARTING"/);
+  for (const state of ['STARTING', 'CONNECTED', 'RECOVERING', 'STOPPING', 'DISCONNECTED', 'ERROR']) {
+    assert.ok(app.includes(state), state);
+  }
+  assert.match(app, /batai:\/\/daemon-status/);
 });

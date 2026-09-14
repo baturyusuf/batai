@@ -115,7 +115,7 @@ impl ProviderApprovalStatus {
         }
     }
 
-    fn terminal(self) -> bool {
+    pub(crate) fn terminal(self) -> bool {
         matches!(
             self,
             Self::Resolved

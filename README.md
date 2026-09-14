@@ -2,7 +2,7 @@
 
 **Batai** is a Director-managed, cost-aware runtime for heterogeneous AI developer teams.
 
-> The `codex/rust-rewrite` branch contains the Rust/Tauri desktop and a Rust-native HTTP/MCP/runtime/delivery control plane. Node remains only as a compatibility-test reference.
+> The `codex/rust-rewrite` branch contains a per-project Rust daemon with concurrent Tauri, HTTP and MCP clients. Node remains only as a compatibility-test reference.
 
 The core idea is that the **Director AI operates the organization through Batai tools**. Batai itself stays deterministic wherever possible: task routing, dependencies, events, worktrees, quota waiting, session recovery and authority state should not spend LLM turns.
 
@@ -34,7 +34,9 @@ The core idea is that the **Director AI operates the organization through Batai 
 - Ollama local-model adapter
 - Mock provider for deterministic tests
 - Rust-native GitHub delivery through the official authenticated `gh` CLI: issue↔task links, isolated commit/push, PR/review/CI state, SHA-bound merge governance and restart reconciliation
-- Official Rust SDK-based MCP Director control server and secure loopback HTTP API, both using the same Rust application kernel as the desktop
+- One long-lived Rust daemon per project with one SQLite/runtime owner and concurrent Desktop, MCP and HTTP clients
+- Official Rust SDK-based MCP Director bridge and secure daemon-hosted loopback HTTP API
+- Versioned, project-bound local RPC, OS-vault credentials, transport-assigned actors, bounded live-event fan-out and persistent mutation deduplication
 - Live node-edge Organization Map with Hierarchy, Workflow and Combined modes, semantic edges, search, filters, pan/zoom and Agent Inspector
 - Organization Edit mode, Agent Factory form, GOD decisions, exact live provider approvals, recovery queue and project policy settings
 - Resource Dashboard with provider health, usage source, quota, token and provider-reported cost summaries
@@ -63,7 +65,9 @@ Open:
 http://127.0.0.1:4317
 ```
 
-`npm start` is a convenience alias for `batai-control serve`. Mutations require a bearer token supplied through `BATAI_CONTROL_TOKEN`; read-only health/state remain loopback-local. Direct native usage is documented in [Control Plane](docs/CONTROL_PLANE.md).
+`npm start` is a convenience alias for `batai-control serve`. It attaches to an existing project daemon or starts one safely. Mutations require a bearer token supplied through `BATAI_CONTROL_TOKEN`; read-only health/state remain loopback-local. Direct native usage is documented in [Control Plane](docs/CONTROL_PLANE.md) and the ownership model in [Daemon Architecture](docs/DAEMON_ARCHITECTURE.md).
+
+Closing the browser, Desktop or MCP bridge leaves the organization running. Use `npm run daemon:stop` (or native `batai-control stop`) for an authenticated graceful stop when the runtime is idle.
 
 ## Run the Rust desktop
 
@@ -75,7 +79,7 @@ npm run test:all
 npm run desktop:dev
 ```
 
-The Rust desktop ingests the existing `.batai` repository contract into SQLite, watches tasks, assigns coding agents safe task worktrees and executes Codex App Server, Claude Code or Ollama through provider-neutral sessions. It can deliver reviewed work through repository-bound GitHub pull requests without the Node wrapper. State and usage updates stream into the UI without storing raw credentials. See [Provider Runtime](docs/PROVIDER_RUNTIME.md) and [GitHub Delivery](docs/GITHUB_DELIVERY.md).
+The Rust desktop attaches to the project daemon rather than opening SQLite or starting watchers/providers itself. The daemon ingests the existing `.batai` repository contract, watches tasks, assigns coding agents safe task worktrees and executes Codex App Server, Claude Code or Ollama through provider-neutral sessions. Closing the UI does not cancel the organization. State and usage updates stream back to reconnecting clients without storing raw credentials. See [Provider Runtime](docs/PROVIDER_RUNTIME.md) and [GitHub Delivery](docs/GITHUB_DELIVERY.md).
 
 Run the authenticated, mutation-level Codex acceptance test only on an explicitly opted-in development machine:
 
@@ -92,7 +96,7 @@ The test creates its own disposable Git repository and managed worktree; it veri
 BATAI_PROJECT_ROOT=/path/to/project cargo run --quiet --manifest-path src-tauri/Cargo.toml --bin batai-control -- mcp
 ```
 
-For npm-based development use `npm run --silent mcp`; MCP clients should launch the native `batai-control mcp` binary directly so stdout contains protocol frames only.
+For npm-based development use `npm run --silent mcp`; MCP clients should launch the native `batai-control mcp` binary directly so stdout contains protocol frames only. The MCP process is a thin Director bridge to the same daemon used by Desktop and HTTP; closing it does not stop active work.
 
 Director tools currently include:
 
@@ -108,7 +112,7 @@ Director tools currently include:
 - `batai_acknowledge_god_message`
 - `batai_request_god_decision`
 
-The server uses the official Rust MCP SDK, supports current discovery plus 2025-11-25 initialize compatibility, and executes as Director through Rust authority checks. It does not construct a Node runtime.
+The bridge uses the official Rust MCP SDK, supports current discovery plus 2025-11-25 initialize compatibility, and executes as Director through Rust authority checks. It does not construct a Node or second Rust runtime.
 
 ## Project model
 

@@ -1,6 +1,6 @@
 # Director MCP Setup
 
-Batai exposes its deterministic control plane as a stdio JSON-RPC/MCP server:
+Batai exposes a thin stdio JSON-RPC/MCP bridge to the per-project Rust daemon:
 
 ```bash
 BATAI_PROJECT_ROOT=/path/to/customer-project npm run mcp
@@ -28,8 +28,8 @@ Example generic configuration:
 {
   "mcpServers": {
     "batai": {
-      "command": "node",
-      "args": ["/absolute/path/to/batai/src/control/mcp-server.mjs"],
+      "command": "/absolute/path/to/batai-control",
+      "args": ["mcp"],
       "env": {
         "BATAI_PROJECT_ROOT": "/absolute/path/to/customer-project"
       }
@@ -39,3 +39,5 @@ Example generic configuration:
 ```
 
 Provider-specific MCP registration syntax may differ on the target machine.
+
+The bridge attaches to an existing daemon or starts one safely. It never opens the project database or starts its own watcher/provider runtime, and stdout is reserved for MCP frames. The deprecated Node MCP file remains only as a compatibility reference.

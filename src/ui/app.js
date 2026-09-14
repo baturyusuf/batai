@@ -63,6 +63,13 @@ async function loadSnapshot() {
     remainingTasks:tasks.filter(task => !['COMPLETED','CANCELLED'].includes(task.status)).length}};
 }
 
+async function loadDaemonState() {
+  if (invoke) return (await invoke('get_daemon_status')).runtime;
+  const response = await fetch('/api/health');
+  if (!response.ok) throw new Error('Runtime health is unavailable');
+  return (await response.json()).runtime;
+}
+
 async function loadProviders() {
   if (invoke) return invoke('get_provider_connections');
   const response = await fetch('/api/providers');
@@ -705,9 +712,28 @@ function initializeGraphControls() {
   });
 }
 
+function renderRuntimeState(state) {
+  const normalized = String(state || 'ERROR').toUpperCase();
+  const copy = {
+    STARTING: ['Runtime starting', 'Connecting to Rust daemon'],
+    CONNECTED: ['Runtime connected', 'Shared Rust daemon'],
+    READY: ['Runtime connected', 'Shared Rust daemon'],
+    RECOVERING: ['Runtime recovering', 'Restoring durable state'],
+    STOPPING: ['Runtime stopping', 'Finishing safe shutdown'],
+    DISCONNECTED: ['Runtime disconnected', 'Reconnecting safely'],
+    ERROR: ['Runtime error', 'Control plane unavailable'],
+  }[normalized] || ['Runtime unavailable', 'Control plane unavailable'];
+  const element = $('.runtime-state');
+  element.dataset.state = normalized;
+  $('.runtime-state strong').textContent = copy[0];
+  $('.runtime-state small').textContent = copy[1];
+}
+
 async function boot() {
   try {
-    [snapshot, providers] = await Promise.all([loadSnapshot(), loadProviders()]);
+    const loaded = await Promise.all([loadSnapshot(), loadProviders(), loadDaemonState()]);
+    [snapshot, providers] = loaded;
+    renderRuntimeState(loaded[2]);
     renderOverview(); renderTasks(); renderProviders(); renderResources(); renderFilters(); renderGovernance(); renderGraph(true);
     graphState.fitted = false;
     $('#blocker-count').textContent = snapshot.project.blockedTasks ?? 0;
@@ -725,6 +751,9 @@ async function boot() {
         } catch (_) { /* the next durable event retries */ }
       }, 140);
     });
+    if (listen) await listen('batai://daemon-status', event => {
+      renderRuntimeState(event.payload?.state);
+    });
     if (listen) await listen('batai://ollama-pull-progress', event => {
       const {modelId,progress}=event.payload ?? {};
       if (!modelId) return;
@@ -738,8 +767,7 @@ async function boot() {
     });
     refreshLocalAi().catch(() => {});
   } catch (error) {
-    $('.runtime-state strong').textContent = 'Runtime offline';
-    $('.runtime-state>i').style.background = 'var(--red)';
+    renderRuntimeState('ERROR');
     $('#organization-preview').innerHTML = `<p class="empty">${esc(error.message)}</p>`;
   }
 }

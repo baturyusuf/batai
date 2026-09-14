@@ -23,14 +23,15 @@
 - Quota reset parser
 - Rust-native loopback HTTP control plane with legacy routes, typed validation, embedded UI, mutation token, Host/Origin defense and bounded bodies
 - Official Rust SDK-based Director MCP stdio control plane with structured output and legacy tool names
-- Shared `BataiApplication` kernel and OS-backed exclusive project runtime ownership across desktop/HTTP/MCP
+- Per-project Rust daemon with one `BataiApplication`, one SQLite writer and concurrent Desktop/MCP/HTTP clients
+- Versioned, project-bound authenticated local RPC with OS-vault credentials, actor isolation, bounded event fan-out and restart-persistent mutation deduplication
 
-Automated suites at the time of this snapshot: **170 passing Rust tests** and **41 passing Node compatibility/UI tests**.
+Automated suites at the time of this snapshot: **183 passing Rust tests** and **42 passing Node compatibility/UI tests**.
 
 ## Implemented and smoke-tested at protocol/process level
 
-- Rust Director MCP stdio control server (`rmcp`), including 2025-11-25 initialize compatibility and current discover lifecycle
-- Rust HTTP control plane API and Node-less binary smoke
+- Rust Director MCP stdio bridge (`rmcp`), including 2025-11-25 initialize compatibility and current discover lifecycle
+- Daemon-hosted Rust HTTP control plane API and Node-less binary smoke
 - GOD Console API
 - Decision Ledger API
 
@@ -97,10 +98,10 @@ Automated suites at the time of this snapshot: **170 passing Rust tests** and **
 - Rust-native GitHub delivery with official `gh` authentication/repository binding, typed issues/PRs/reviews/checks, issue-task links, isolated commit/push, PR idempotence, durable CI refresh, SHA-bound merge governance and remote saga recovery.
 - Task delivery timeline and PR inspector with explicit merge controls; required delivery pauses task completion until a merged PR is observed.
 - Node GitHub/worktree/HTTP/MCP code is no longer used by production entry points; remaining Node files are compatibility-test references documented in `NODE_RETIREMENT.md`.
-- One hundred sixty-nine Rust library tests, including HTTP security, official MCP lifecycle/tool calls and exclusive project ownership in addition to delivery/runtime coverage.
+- One hundred eighty-three Rust library tests, including HTTP security, official MCP lifecycle/tool calls, one-owner startup races, concurrent client access, actor isolation, event fan-out, recovery gating, authenticated shutdown and restart-persistent request deduplication.
 - Manual UI smoke at 1440x900 and 1100x720 with no JavaScript console errors.
 
-The external production control plane is Rust-native. Node remains only for compatibility fixtures and migration tests.
+The external production control plane is Rust-native and daemon-owned. Closing Desktop or MCP no longer shuts down the project organization. Node remains only for compatibility fixtures and migration tests.
 
 ## Next engineering milestones
 
@@ -108,5 +109,6 @@ The external production control plane is Rust-native. Node remains only for comp
 2. Implement meeting scheduling, event-derived temporary graph groups and automatic safe summaries on the typed meeting foundation.
 3. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
 4. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.
-5. After one compatibility release, remove deprecated Node HTTP/MCP reference files and split the remaining Node migration suite from release packaging.
-6. Add native editor/LSP/terminal integration beyond the workspace scaffold.
+5. Add controlled daemon restart/upgrade handoff and an optional idle-exit policy that checks active runtime work before shutdown.
+6. After one compatibility release, remove deprecated Node HTTP/MCP reference files and split the remaining Node migration suite from release packaging.
+7. Add native editor/LSP/terminal integration beyond the workspace scaffold.

@@ -13,6 +13,8 @@
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test:all": "npm test && npm run test:rust",
     "test:watch": "node --test --watch",
+    "daemon": "cargo run --quiet --manifest-path src-tauri/Cargo.toml --bin batai-control -- daemon",
+    "daemon:stop": "cargo run --quiet --manifest-path src-tauri/Cargo.toml --bin batai-control -- stop",
     "mcp": "cargo run --quiet --manifest-path src-tauri/Cargo.toml --bin batai-control -- mcp",
     "start:node-reference": "node src/server.mjs",
     "mcp:node-reference": "node src/control/mcp-server.mjs"
