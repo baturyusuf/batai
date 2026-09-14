@@ -63,7 +63,23 @@ export function buildHierarchyGraph(snapshot, filters = {}) {
     }
   }
   layoutLayers(nodes, node => hierarchyDepth(node.id, parentById, available));
+  addMeetingOverlay(snapshot, nodes, edges, available);
   return {nodes, edges, warnings: snapshot.hierarchyWarnings ?? []};
+}
+
+function addMeetingOverlay(snapshot, nodes, edges, availableAgents) {
+  const running = (snapshot.meetings ?? []).filter(meeting => meeting.status === 'RUNNING');
+  if (!running.length) return;
+  const baseY = Math.max(0, ...nodes.map(node => node.y)) + 185;
+  running.forEach((meeting, index) => {
+    const id = `meeting:${meeting.id}`;
+    nodes.push({id, type:'meeting', data:meeting, x:(index - (running.length - 1) / 2) * 300, y:baseY});
+    for (const participant of meeting.participants ?? []) {
+      if (availableAgents.has(participant.agentId)) {
+        edges.push({id:`meeting:${meeting.id}:${participant.agentId}`,source:participant.agentId,target:id,type:'COLLABORATION',label:'meeting'});
+      }
+    }
+  });
 }
 
 function taskDepth(task, byId, trail = new Set()) {
@@ -135,7 +151,7 @@ export function buildGraph(snapshot, mode = 'hierarchy', filters = {}) {
 
 export function searchableText(node) {
   const data = node.data ?? {};
-  return [data.name, data.title, data.id, data.objective, data.currentTaskId, data.currentTaskObjective]
+  return [data.name, data.title, data.id, data.objective, data.currentTaskId, data.currentTaskObjective, ...(data.agenda ?? [])]
     .filter(Boolean).join(' ').toLowerCase();
 }
 

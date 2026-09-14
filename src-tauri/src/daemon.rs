@@ -29,6 +29,7 @@ use crate::{
     runtime::{
         credentials::{CredentialStore, OsCredentialStore},
         governance::{Actor, AuthorityScope, ManualCapabilityEdit, MutationRequest, ReviewOutcome},
+        meetings::CreateMeetingRequest,
         recovery::RecoveryAction,
     },
 };
@@ -200,6 +201,15 @@ impl ControlService {
                         .iter()
                         .any(|approval| !approval.status.terminal())
                     || snapshot.governance.recovery_requires_review > 0;
+                let active_work = active_work
+                    || snapshot.meetings.iter().any(|meeting| {
+                        matches!(
+                            meeting.status,
+                            crate::runtime::meetings::MeetingStatus::Planned
+                                | crate::runtime::meetings::MeetingStatus::Ready
+                                | crate::runtime::meetings::MeetingStatus::Running
+                        )
+                    });
                 if active_work && !force {
                     return Err("runtime has active or review-required work; retry with explicit force only after user confirmation".into());
                 }
@@ -390,6 +400,21 @@ impl ControlService {
                     value(runtime.governance.record_review(review))
                 }
             }
+            "create_meeting" => {
+                ensure_origin(origin, ClientOrigin::Desktop)?;
+                value(self.application.create_meeting(god_actor(), parse::<CreateMeetingRequest>(params.get("request").cloned().unwrap_or(params))?))
+            }
+            "get_meeting" => value(self.application.get_meeting(&string_param(&params,"meetingId","meeting_id")?)),
+            "list_meetings" => value(self.application.list_meetings()),
+            "cancel_meeting" => {
+                ensure_origin(origin, ClientOrigin::Desktop)?;
+                value(self.application.cancel_meeting(god_actor(), &string_param(&params,"meetingId","meeting_id")?).await)
+            }
+            "create_meeting_action_task" => {
+                ensure_origin(origin, ClientOrigin::Desktop)?;
+                let assigned_to: Vec<String> = serde_json::from_value(params.get("assignedTo").or_else(||params.get("assigned_to")).cloned().unwrap_or_else(||json!([]))).map_err(|e|e.to_string())?;
+                value(self.application.create_meeting_action_task(god_actor(), &string_param(&params,"meetingId","meeting_id")?, &string_param(&params,"actionId","action_id")?, assigned_to).await)
+            }
 
             // MCP Director surface. Origin is assigned by the authenticated transport.
             "batai_create_agent" => { ensure_origin(origin, ClientOrigin::Mcp)?; value(self.application.create_agent(parse(params)?)) }
@@ -407,6 +432,10 @@ impl ControlService {
             "batai_get_delivery" => value(self.application.get_delivery(&string_param(&params,"task_id","taskId")?)),
             "batai_get_decisions" => value(runtime.governance.snapshot().map(|s| json!({"decisions":s.decisions,"providerApprovals":s.provider_approvals}))),
             "batai_get_recovery_state" => value(runtime.governance.snapshot().map(|s| json!({"operations":s.recovery_operations,"requiresReview":s.recovery_requires_review}))),
+            "batai_create_meeting" => { ensure_origin(origin, ClientOrigin::Mcp)?; value(self.application.create_meeting(director_actor(), parse::<CreateMeetingRequest>(params)?)) },
+            "batai_get_meeting" => { ensure_origin(origin, ClientOrigin::Mcp)?; value(self.application.get_meeting(&string_param(&params,"meeting_id","meetingId")?)) },
+            "batai_list_meetings" => { ensure_origin(origin, ClientOrigin::Mcp)?; value(self.application.list_meetings()) },
+            "batai_cancel_meeting" => { ensure_origin(origin, ClientOrigin::Mcp)?; value(self.application.cancel_meeting(director_actor(), &string_param(&params,"meeting_id","meetingId")?).await) },
             other => Err(format!("unknown daemon method: {other}")),
         }
     }
@@ -1315,6 +1344,10 @@ fn is_mutation(method: &str) -> bool {
             | "batai_get_delivery"
             | "batai_get_decisions"
             | "batai_get_recovery_state"
+            | "batai_get_meeting"
+            | "batai_list_meetings"
+            | "get_meeting"
+            | "list_meetings"
             | "replay_routing_decision"
     )
 }
@@ -1331,6 +1364,12 @@ fn ensure_origin(actual: ClientOrigin, expected: ClientOrigin) -> Result<(), Str
 fn god_actor() -> Actor {
     Actor {
         id: "god".into(),
+        scope: AuthorityScope::Project,
+    }
+}
+fn director_actor() -> Actor {
+    Actor {
+        id: "director".into(),
         scope: AuthorityScope::Project,
     }
 }

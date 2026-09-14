@@ -15,6 +15,7 @@ use crate::runtime::{
         CapabilityLearningPolicy, PromotionSuggestion, RoutingCalibrationRecord,
         TaskOutcomeEvidence,
     },
+    meetings::{Meeting, MeetingTurn},
     organization::{CapabilityProfile, OrganizationRelationship},
 };
 
@@ -257,6 +258,10 @@ pub struct AppSnapshot {
     pub external_links: Vec<ExternalLink>,
     #[serde(default)]
     pub remote_operations: Vec<RemoteOperationJournal>,
+    #[serde(default)]
+    pub meetings: Vec<Meeting>,
+    #[serde(default)]
+    pub meeting_turns: BTreeMap<String, Vec<MeetingTurn>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

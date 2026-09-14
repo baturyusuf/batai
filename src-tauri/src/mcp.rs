@@ -18,6 +18,7 @@ use crate::{
     },
     daemon::{ClientOrigin, ControlService, DaemonClient},
     providers::process_supervisor::redact_secrets,
+    runtime::meetings::CreateMeetingRequest,
 };
 
 #[derive(Clone)]
@@ -245,6 +246,47 @@ impl DirectorMcpServer {
     async fn get_recovery_state(&self) -> Result<Json<Value>, String> {
         self.invoke("batai_get_recovery_state", json!({})).await
     }
+
+    #[tool(
+        name = "batai_create_meeting",
+        description = "Create a bounded meeting through the daemon Meeting Engine. Participants, rounds, tokens, PAYG and authority remain policy-enforced."
+    )]
+    async fn create_meeting(
+        &self,
+        Parameters(input): Parameters<CreateMeetingRequest>,
+    ) -> Result<Json<Value>, String> {
+        self.invoke("batai_create_meeting", input).await
+    }
+
+    #[tool(
+        name = "batai_get_meeting",
+        description = "Read one persisted meeting and its current bounded execution state."
+    )]
+    async fn get_meeting(
+        &self,
+        Parameters(input): Parameters<MeetingIdArgs>,
+    ) -> Result<Json<Value>, String> {
+        self.invoke("batai_get_meeting", input).await
+    }
+
+    #[tool(
+        name = "batai_list_meetings",
+        description = "List persisted meetings without provider transcripts or hidden reasoning."
+    )]
+    async fn list_meetings(&self) -> Result<Json<Value>, String> {
+        self.invoke("batai_list_meetings", json!({})).await
+    }
+
+    #[tool(
+        name = "batai_cancel_meeting",
+        description = "Cancel one exact meeting and request cancellation of its live provider turns. Partial output is never promoted to a final decision."
+    )]
+    async fn cancel_meeting(
+        &self,
+        Parameters(input): Parameters<MeetingIdArgs>,
+    ) -> Result<Json<Value>, String> {
+        self.invoke("batai_cancel_meeting", input).await
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -286,6 +328,11 @@ struct TaskIdArgs {
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
 struct AgentIdArgs {
     agent_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+struct MeetingIdArgs {
+    meeting_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -395,6 +442,10 @@ mod tests {
         let listed = client.receive().await.expect("tools/list response");
         let listed = serde_json::to_value(listed).expect("serialize response");
         assert!(listed.to_string().contains("batai_read_project_state"));
+        assert!(listed.to_string().contains("batai_create_meeting"));
+        assert!(listed.to_string().contains("batai_get_meeting"));
+        assert!(listed.to_string().contains("batai_list_meetings"));
+        assert!(listed.to_string().contains("batai_cancel_meeting"));
 
         client
             .send(message(json!({

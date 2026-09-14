@@ -1245,6 +1245,20 @@ impl TaskEngine {
         Ok(Some(guards))
     }
 
+    /// Shares the task engine's per-agent execution lane with bounded
+    /// coordination primitives such as meetings. This prevents a meeting turn
+    /// and a coding task from using the same organizational agent concurrently.
+    pub(crate) async fn acquire_agent_lane(&self, agent_id: &str) -> Result<OwnedMutexGuard<()>> {
+        let lock = self
+            .agent_locks
+            .lock()
+            .map_err(|_| RuntimeError::Lock("agent locks"))?
+            .entry(agent_id.to_owned())
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone();
+        Ok(lock.lock_owned().await)
+    }
+
     fn dependencies_satisfied(&self, task: &Task) -> Result<bool> {
         for id in &task.dependencies {
             if self

@@ -14,6 +14,7 @@ use super::{
     economic::{EconomicPolicy, ResourceProfile, RoutingDecision},
     errors::{Result, RuntimeError},
     learning::{CapabilityLearningPolicy, RoutingCalibrationRecord, TaskOutcomeEvidence},
+    meetings::{Meeting, MeetingTurn, MeetingTurnKind},
     migrations,
     recovery::OperationJournal,
     types::{
@@ -122,6 +123,94 @@ impl RuntimeStore {
             [request_id],
         )?;
         Ok(())
+    }
+
+    pub fn upsert_meeting(&self, meeting: &Meeting) -> Result<()> {
+        self.db()?.execute(
+            r#"INSERT INTO meetings(id,status,organizer,linked_task,meeting_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET status=excluded.status,
+               organizer=excluded.organizer,linked_task=excluded.linked_task,
+               meeting_json=excluded.meeting_json,updated_at=excluded.updated_at"#,
+            params![
+                meeting.id,
+                enum_column(meeting.status)?,
+                meeting.organizer,
+                meeting.linked_task,
+                serde_json::to_string(meeting)?,
+                meeting.created_at,
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_meeting(&self, id: &str) -> Result<Option<Meeting>> {
+        self.db()?
+            .query_row(
+                "SELECT meeting_json FROM meetings WHERE id=?",
+                [id],
+                |row| json_column(row.get::<_, String>(0)?),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_meetings(&self) -> Result<Vec<Meeting>> {
+        let db = self.db()?;
+        let mut statement =
+            db.prepare("SELECT meeting_json FROM meetings ORDER BY created_at DESC")?;
+        let values = statement
+            .query_map([], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
+    }
+
+    pub fn upsert_meeting_turn(&self, turn: &MeetingTurn) -> Result<()> {
+        self.db()?.execute(
+            r#"INSERT INTO meeting_turns(id,meeting_id,round_number,participant_id,kind,status,turn_json,created_at,updated_at)
+               VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(meeting_id,round_number,participant_id,kind)
+               DO UPDATE SET status=excluded.status,turn_json=excluded.turn_json,updated_at=excluded.updated_at"#,
+            params![
+                turn.id,
+                turn.meeting_id,
+                i64::from(turn.round),
+                turn.participant_id,
+                enum_column(turn.kind)?,
+                enum_column(turn.status)?,
+                serde_json::to_string(turn)?,
+                turn.created_at,
+                now()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn meeting_turn(
+        &self,
+        meeting_id: &str,
+        round: u8,
+        participant_id: &str,
+        kind: MeetingTurnKind,
+    ) -> Result<Option<MeetingTurn>> {
+        self.db()?
+            .query_row(
+                "SELECT turn_json FROM meeting_turns WHERE meeting_id=? AND round_number=? AND participant_id=? AND kind=?",
+                params![meeting_id, i64::from(round), participant_id, enum_column(kind)?],
+                |row| json_column(row.get::<_, String>(0)?),
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn list_meeting_turns(&self, meeting_id: &str) -> Result<Vec<MeetingTurn>> {
+        let db = self.db()?;
+        let mut statement = db.prepare(
+            "SELECT turn_json FROM meeting_turns WHERE meeting_id=? ORDER BY round_number,participant_id,kind",
+        )?;
+        let values = statement
+            .query_map([meeting_id], |row| json_column(row.get::<_, String>(0)?))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(values)
     }
 
     pub fn upsert_external_link(&self, link: &ExternalLink) -> Result<()> {

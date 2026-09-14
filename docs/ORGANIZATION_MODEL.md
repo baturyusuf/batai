@@ -67,6 +67,8 @@ Reporting is solid; collaboration, dependency, handoff and review use distinct d
 
 The Inspector separates organizational identity from assigned intelligence and provides Overview, Tasks, Activity, Usage, Performance and Permissions/Context tabs. With no selection it shows weighted project progress, task/agent state and real known resource totals.
 
+Running bounded meetings add a temporary coordination node and collaboration edges to participants. This overlay never changes reporting lines. Participant nodes show `MEETING` activity, while durable history and the structured outcome live in the Meetings panel. See [Meetings](MEETINGS.md).
+
 ## Current boundaries
 
-Meeting-derived graph groups are not implemented. Provider event vocabularies do not yet expose reliable reading/testing distinctions for every provider. Energy estimates, broad leaderboard benchmarking and hidden reasoning remain outside the product boundary; the local suite measures only Batai worker fit.
+Provider event vocabularies do not yet expose reliable reading/testing distinctions for every provider. Energy estimates, broad leaderboard benchmarking and hidden reasoning remain outside the product boundary; the local suite measures only Batai worker fit.

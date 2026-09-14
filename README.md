@@ -37,6 +37,7 @@ The core idea is that the **Director AI operates the organization through Batai 
 - One long-lived Rust daemon per project with one SQLite/runtime owner and concurrent Desktop, MCP and HTTP clients
 - Official Rust SDK-based MCP Director bridge and secure daemon-hosted loopback HTTP API
 - Versioned, project-bound local RPC, OS-vault credentials, transport-assigned actors, bounded live-event fan-out and persistent mutation deduplication
+- Bounded multi-agent meetings with independent first positions, conditional disagreement response, deterministic closure, economic/provider gates and restart-safe turn identity
 - Live node-edge Organization Map with Hierarchy, Workflow and Combined modes, semantic edges, search, filters, pan/zoom and Agent Inspector
 - Organization Edit mode, Agent Factory form, GOD decisions, exact live provider approvals, recovery queue and project policy settings
 - Resource Dashboard with provider health, usage source, quota, token and provider-reported cost summaries
@@ -111,8 +112,14 @@ Director tools currently include:
 - `batai_read_director_inbox`
 - `batai_acknowledge_god_message`
 - `batai_request_god_decision`
+- `batai_create_meeting`
+- `batai_get_meeting`
+- `batai_list_meetings`
+- `batai_cancel_meeting`
 
 The bridge uses the official Rust MCP SDK, supports current discovery plus 2025-11-25 initialize compatibility, and executes as Director through Rust authority checks. It does not construct a Node or second Rust runtime.
+
+Meetings are deliberately bounded coordination primitives, not chat rooms. See [Meetings](docs/MEETINGS.md) for limits, economic routing, authority, recovery and the live Organization Map overlay.
 
 ## Project model
 

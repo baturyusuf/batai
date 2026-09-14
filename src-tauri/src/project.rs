@@ -90,6 +90,8 @@ impl ProjectStore {
             deliveries: vec![],
             external_links: vec![],
             remote_operations: vec![],
+            meetings: vec![],
+            meeting_turns: Default::default(),
         })
     }
 

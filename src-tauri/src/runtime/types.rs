@@ -148,7 +148,15 @@ uppercase_enum!(EventType {
     CiPassed,
     CiFailed,
     MergeRequired,
-    PullRequestMerged
+    PullRequestMerged,
+    MeetingCreated,
+    MeetingStarted,
+    MeetingRoundStarted,
+    MeetingParticipantStarted,
+    MeetingParticipantCompleted,
+    MeetingBlocked,
+    MeetingCompleted,
+    MeetingCancelled
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

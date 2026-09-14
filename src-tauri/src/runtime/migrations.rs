@@ -2,7 +2,7 @@ use rusqlite::Connection;
 
 use super::errors::Result;
 
-pub const SCHEMA_VERSION: i64 = 12;
+pub const SCHEMA_VERSION: i64 = 13;
 
 pub fn migrate(connection: &mut Connection) -> Result<()> {
     connection.execute_batch(
@@ -240,6 +240,25 @@ pub fn migrate(connection: &mut Connection) -> Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_rpc_results_created
           ON rpc_mutation_results(created_at);
+        "#,
+    )?;
+    apply(
+        connection,
+        13,
+        r#"
+        CREATE TABLE IF NOT EXISTS meetings (
+          id TEXT PRIMARY KEY, status TEXT NOT NULL, organizer TEXT NOT NULL,
+          linked_task TEXT, meeting_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_meetings_status ON meetings(status, updated_at);
+        CREATE TABLE IF NOT EXISTS meeting_turns (
+          id TEXT PRIMARY KEY, meeting_id TEXT NOT NULL, round_number INTEGER NOT NULL,
+          participant_id TEXT NOT NULL, kind TEXT NOT NULL, status TEXT NOT NULL,
+          turn_json TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          UNIQUE(meeting_id, round_number, participant_id, kind),
+          FOREIGN KEY(meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_meeting_turns_meeting ON meeting_turns(meeting_id, round_number, participant_id);
         "#,
     )?;
     Ok(())

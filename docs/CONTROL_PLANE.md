@@ -41,7 +41,7 @@ Errors use a stable JSON envelope with `error`, safe `message` and `details`. Va
 
 The stdio implementation uses the official `modelcontextprotocol/rust-sdk` (`rmcp` 3.3). Typed request structs generate JSON Schema, structured content is returned with the SDK's text fallback and stdout is reserved for protocol frames. EOF stops only the thin MCP bridge; the project daemon and active tasks continue.
 
-All eleven legacy tool names are preserved. Additive read-only tools expose tasks, resources, delivery, decisions and recovery state. MCP calls execute as `DIRECTOR`; protected agent/GitHub/provider operations still route through Rust governance and can yield a GOD decision. `batai_update_directives` uses the recoverable operation journal instead of writing directly.
+All eleven legacy tool names are preserved. Additive tools expose tasks, resources, delivery, decisions, recovery and bounded meetings. MCP calls execute as `DIRECTOR`; protected agent/GitHub/provider/meeting operations still route through Rust governance and can yield a GOD decision. `batai_update_directives` uses the recoverable operation journal instead of writing directly.
 
 Checked 2026-09-13 against the official SDK and MCP lifecycle documentation. The server supports the current `2026-07-28` discover lifecycle exposed by the SDK and retains the `2025-11-25` initialize negotiation used by existing clients. An initialize request cannot negotiate the newer discover-only lifecycle; the SDK correctly falls back to the newest handshake-based revision instead of echoing an unsupported version.
 

@@ -33,7 +33,7 @@ HTTP compatibility mutations keep their separate bearer-token and Host/Origin pr
 
 The internal envelope includes protocol version, stable request ID, client ID, project fingerprint, method and typed JSON parameters. The handshake returns daemon/client compatibility, daemon version and runtime state. Exact protocol version matching is intentionally conservative for this first local protocol; incompatible clients receive a restart-required result rather than undefined parsing.
 
-The allowlisted command surface maps to the same `ControlService` and Rust domain services used by the daemon. It includes snapshots, resources, governed organization/task operations, delivery, provider approvals and the legacy Director MCP operations. Transports do not write files, run providers or open SQLite directly.
+The allowlisted command surface maps to the same `ControlService` and Rust domain services used by the daemon. It includes snapshots, resources, governed organization/task operations, bounded meetings, delivery, provider approvals and the legacy Director MCP operations. Transports do not write files, run providers or open SQLite directly. Meeting turns continue when Desktop or MCP disconnects because only the daemon owns them.
 
 Mutations use a durable request-deduplication record. A request ID is claimed as `APPLYING` before dispatch and replaced with its result after success. Repeating a completed request returns the stored result. If the daemon dies after the effect but before the result is stored, the surviving marker returns `RESPONSE_UNCERTAIN`; Batai does not replay the mutation blindly. Cross-store and remote effects still use the stronger existing recovery/remote-operation journals.
 

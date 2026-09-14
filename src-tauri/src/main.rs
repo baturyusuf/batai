@@ -12,6 +12,7 @@ use batai::{
         economic::{EconomicPolicy, ResourceProfile},
         governance::{MutationRequest, MutationResult, ProviderApproval, ReviewOutcome},
         learning::{CapabilityLearningPolicy, RouterReplayResult},
+        meetings::{CreateMeetingRequest, Meeting},
         recovery::{OperationJournal, RecoveryAction},
         types::Task,
     },
@@ -400,6 +401,50 @@ async fn record_review_outcome(
     rpc(&state, "record_review_outcome", json!({"review":review})).await
 }
 
+#[tauri::command]
+async fn create_meeting(
+    request: CreateMeetingRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<Meeting, String> {
+    rpc(&state, "create_meeting", json!({"request": request})).await
+}
+
+#[tauri::command]
+async fn get_meeting(
+    meeting_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<Meeting>, String> {
+    rpc(&state, "get_meeting", json!({"meetingId": meeting_id})).await
+}
+
+#[tauri::command]
+async fn list_meetings(state: tauri::State<'_, AppState>) -> Result<Vec<Meeting>, String> {
+    rpc(&state, "list_meetings", json!({})).await
+}
+
+#[tauri::command]
+async fn cancel_meeting(
+    meeting_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Meeting, String> {
+    rpc(&state, "cancel_meeting", json!({"meetingId": meeting_id})).await
+}
+
+#[tauri::command]
+async fn create_meeting_action_task(
+    meeting_id: String,
+    action_id: String,
+    assigned_to: Vec<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Task, String> {
+    rpc(
+        &state,
+        "create_meeting_action_task",
+        json!({"meetingId": meeting_id, "actionId": action_id, "assignedTo": assigned_to}),
+    )
+    .await
+}
+
 fn project_root() -> PathBuf {
     std::env::var_os("BATAI_PROJECT_ROOT")
         .map(PathBuf::from)
@@ -464,7 +509,12 @@ fn main() {
             resolve_god_decision,
             resolve_provider_approval,
             resolve_recovery_operation,
-            record_review_outcome
+            record_review_outcome,
+            create_meeting,
+            get_meeting,
+            list_meetings,
+            cancel_meeting,
+            create_meeting_action_task
         ])
         .build(tauri::generate_context!())
         .expect("error while building Batai desktop shell");

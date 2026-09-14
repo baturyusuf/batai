@@ -16,7 +16,7 @@ const number = value => value === null || value === undefined ? '—' : Number(v
 const percent = value => value === null || value === undefined ? '—' : `${Math.round(value * 10) / 10}%`;
 const departmentLabel = value => value === 'DATA_AI' || value === 'DataAi' ? 'Data & AI' : label(value);
 
-let snapshot = {god:{id:'god',label:'User'},project:{name:'Batai',progress:0,usage:{}},agents:[],tasks:[],relationships:[],resources:[],intelligenceResources:[],localModels:[],routingDecisions:[],activity:[],hierarchyWarnings:[],governance:{revision:0,policy:{limits:{maxActiveAgents:8,maxHierarchyDepth:3}},decisions:[],providerApprovals:[],audit:[],recoveryOperations:[],recoveryRequiresReview:0}};
+let snapshot = {god:{id:'god',label:'User'},project:{name:'Batai',progress:0,usage:{}},agents:[],tasks:[],meetings:[],meetingTurns:{},relationships:[],resources:[],intelligenceResources:[],localModels:[],routingDecisions:[],activity:[],hierarchyWarnings:[],governance:{revision:0,policy:{limits:{maxActiveAgents:8,maxHierarchyDepth:3}},decisions:[],providerApprovals:[],audit:[],recoveryOperations:[],recoveryRequiresReview:0}};
 let providers = [];
 let localAiState = null;
 const pullProgress = new Map();
@@ -25,6 +25,7 @@ let inspectorTab = 'overview';
 let organizationEditMode = false;
 let confirmOperation = null;
 let capabilityResourceId = null;
+let selectedMeetingId = null;
 const graphState = {
   mode:'hierarchy', scale:1, tx:0, ty:20, selectedId:null, query:'', fitted:false,
   filters:{departments:[],seniorities:[],statuses:[],providers:[]}
@@ -89,7 +90,7 @@ function initials(agent) {
 }
 
 function activityIcon(activity) {
-  return ({CODING:'</>',READING:'R',TESTING:'✓',REVIEWING:'◇',BLOCKED:'!',WAITING:'…',RATE_LIMITED:'⏱',PROCESSING:'⋯',WORKING:'⋯',IDLE:'○'}[activity] ?? '⋯');
+  return ({CODING:'</>',READING:'R',TESTING:'✓',REVIEWING:'◇',MEETING:'◉',BLOCKED:'!',WAITING:'…',RATE_LIMITED:'⏱',PROCESSING:'⋯',WORKING:'⋯',IDLE:'○'}[activity] ?? '⋯');
 }
 
 function agentNode(agent) {
@@ -129,6 +130,39 @@ function renderTasks() {
     const task=snapshot.tasks.find(item=>item.id===card.dataset.taskId);
     if(task){switchView('organization');renderTaskInspector(task);}
   }));
+}
+
+function meetingTurns(meeting) {
+  return snapshot.meetingTurns?.[meeting.id] ?? [];
+}
+
+function renderMeetings() {
+  const meetings = snapshot.meetings ?? [];
+  $('#meeting-nav-count').textContent = meetings.filter(item => ['READY','RUNNING','PAUSED','BLOCKED'].includes(item.status)).length;
+  if (selectedMeetingId && !meetings.some(item => item.id === selectedMeetingId)) selectedMeetingId = null;
+  $('#meeting-list').innerHTML = meetings.map(meeting => `<button class="meeting-list-item ${meeting.id === selectedMeetingId ? 'active' : ''}" data-meeting-id="${esc(meeting.id)}"><div><strong>${esc(meeting.title)}</strong><span>${esc(meeting.objective)}</span><small>${esc(meeting.id)} · ${meeting.participants.length} participants · round ${meeting.currentRound}/${meeting.maxRounds}</small></div><span class="meeting-status ${esc(meeting.status.toLowerCase())}">${esc(label(meeting.status))}</span></button>`).join('') || '<p class="empty" style="padding:15px">No meetings yet. Create one only when bounded coordination adds value.</p>';
+  $$('[data-meeting-id]', $('#meeting-list')).forEach(button => button.addEventListener('click', () => { selectedMeetingId = button.dataset.meetingId; renderMeetings(); }));
+  const selected = meetings.find(item => item.id === selectedMeetingId) ?? meetings[0];
+  if (!selected) { $('#meeting-detail').innerHTML = '<p class="empty">Select a meeting to inspect its progress and outcome.</p>'; return; }
+  selectedMeetingId = selected.id;
+  renderMeetingDetail(selected);
+}
+
+function renderMeetingDetail(meeting) {
+  const turns = meetingTurns(meeting);
+  const active = turns.filter(turn => turn.status === 'RUNNING').map(turn => turn.participantId);
+  const completed = turns.filter(turn => turn.status === 'COMPLETED' && turn.kind !== 'CLOSURE');
+  const possible = Math.max(1, meeting.participants.length * meeting.maxRounds);
+  const progress = meeting.status === 'COMPLETED' ? 100 : Math.min(95, Math.round(completed.length / possible * 100));
+  const charged = turns.reduce((sum, turn) => sum + (turn.chargedTokens ?? 0), 0);
+  const remaining = Math.max(0, meeting.totalMeetingTokenBudget - charged);
+  const outcome = meeting.result;
+  const contributions = turns.filter(turn => turn.contribution).map(turn => `<article class="contribution"><strong>${esc((meeting.participants.find(person => person.agentId === turn.participantId)?.name) ?? turn.participantId)} · ${esc(label(turn.kind))}</strong><small>Round ${turn.round} · ${esc(label(turn.status))} · ${number(turn.chargedTokens)} charged tokens</small><p>${esc(turn.contribution.position)}</p>${turn.contribution.disagreements?.length ? `<small>Disagreement: ${esc(turn.contribution.disagreements.join(' · '))}</small>` : ''}</article>`).join('');
+  const actions = outcome?.actionItems?.map(item => `<div class="meeting-action"><div><strong>${esc(item.description)}</strong><small>${esc(item.suggestedOwner ?? 'Unassigned')}${item.taskId ? ` · ${esc(item.taskId)}` : ''}</small></div>${item.taskId ? '' : `<button data-action-task="${esc(item.id)}">Create task</button>`}</div>`).join('') ?? '';
+  const cost = meeting.usage?.knownCost == null ? 'Unknown' : `${meeting.usage.currency ?? ''} ${Number(meeting.usage.knownCost).toFixed(4)}`.trim();
+  $('#meeting-detail').innerHTML = `<div class="meeting-detail-head"><div><p class="eyebrow">${esc(meeting.id)}</p><h2>${esc(meeting.title)}</h2><p>${esc(meeting.objective)}</p></div>${['READY','RUNNING','PAUSED','BLOCKED'].includes(meeting.status) ? `<button data-cancel-meeting>Cancel meeting</button>` : ''}</div><div class="meeting-progress"><i style="width:${progress}%"></i></div><div class="meeting-facts"><div><span>Status</span><strong>${esc(label(meeting.status))}</strong></div><div><span>Round</span><strong>${meeting.currentRound} / ${meeting.maxRounds}</strong></div><div><span>Active now</span><strong>${esc(active.join(', ') || '—')}</strong></div><div><span>Budget remaining</span><strong>${number(remaining)} tokens</strong></div></div><section class="meeting-section"><h3>Agenda</h3><ol>${meeting.agenda.map(item => `<li>${esc(item)}</li>`).join('')}</ol></section><section class="meeting-section"><h3>Participants</h3><div class="meeting-participants">${meeting.participants.map(person => `<div class="meeting-person"><strong>${esc(person.name)}</strong><small>${esc(person.title)} · ${esc(person.agentId === meeting.closureOwner ? 'Closure owner' : label(person.function))}</small></div>`).join('')}</div></section><section class="meeting-section"><h3>Contributions</h3>${contributions || '<p class="empty">No persisted contribution yet.</p>'}</section>${outcome ? `<section class="meeting-section"><h3>Outcome · ${esc(label(outcome.agreementState ?? 'NOT_OBSERVED'))}</h3><p>${esc(outcome.summary)}</p><strong>Agreements</strong><ul>${outcome.agreements.map(item => `<li>${esc(item)}</li>`).join('') || '<li>None observed</li>'}</ul><strong>Disagreements</strong><ul>${outcome.disagreements.map(item => `<li>${esc(item)}</li>`).join('') || '<li>None observed</li>'}</ul><strong>Unresolved</strong><ul>${outcome.unresolvedQuestions.map(item => `<li>${esc(item)}</li>`).join('') || '<li>None</li>'}</ul></section><section class="meeting-section"><h3>Actions</h3>${actions || '<p class="empty">No action items.</p>'}</section>` : ''}<section class="meeting-section"><h3>Usage</h3><div class="meeting-usage"><div><span>Input</span><strong>${number(meeting.usage?.inputTokens)}</strong></div><div><span>Output</span><strong>${number(meeting.usage?.outputTokens)}</strong></div><div><span>Charged total</span><strong>${number(meeting.usage?.totalTokens ?? charged)}</strong></div><div><span>Known PAYG cost</span><strong>${esc(cost)}</strong></div></div><p class="metric-note">Unknown provider usage is conservatively charged against the meeting token ceiling; monetary cost is never invented.</p></section>${meeting.recoveryNote ? `<p class="recovery-health">${esc(meeting.recoveryNote)}</p>` : ''}`;
+  $('[data-cancel-meeting]')?.addEventListener('click', async () => { if (!invoke) return; await invoke('cancel_meeting',{meetingId:meeting.id}); await refreshSnapshot(); });
+  $$('[data-action-task]').forEach(button => button.addEventListener('click', async () => { if (!invoke) return; const action=meeting.result?.actionItems?.find(item=>item.id===button.dataset.actionTask); const fallback=meeting.participants[0]?.agentId; const owner=action?.suggestedOwner && snapshot.agents.some(agent=>agent.id===action.suggestedOwner) ? action.suggestedOwner : fallback; if (!owner) return window.alert('Choose an available participant before creating this task.'); button.disabled=true; try { await invoke('create_meeting_action_task',{meetingId:meeting.id,actionId:button.dataset.actionTask,assignedTo:[owner]}); await refreshSnapshot(); } catch(error) { window.alert(String(error)); } finally { button.disabled=false; } }));
 }
 
 function renderProviders() {
@@ -297,7 +331,7 @@ async function saveLearningPolicy(event) {
 
 async function refreshSnapshot() {
   snapshot = await loadSnapshot();
-  renderOverview(); renderTasks(); renderResources(); renderFilters(); renderGovernance(); renderGraph(true);
+  renderOverview(); renderTasks(); renderMeetings(); renderResources(); renderFilters(); renderGovernance(); renderGraph(true);
   if (graphState.selectedId) {
     const agent = snapshot.agents.find(item => item.id === graphState.selectedId);
     if (agent) renderInspector(agent);
@@ -354,6 +388,7 @@ function renderFilters() {
 function graphNodeHtml(node) {
   if (node.type === 'god') return `<div class="graph-card god-card" role="button" tabindex="0"><div class="god-symbol">G</div><div><strong>GOD</strong><span>${esc(node.data.label ?? 'User')}</span><small>Highest human authority</small></div></div>`;
   if (node.type === 'task') return `<div class="graph-card task-graph-card status-${esc(node.data.status.toLowerCase())}" role="button" tabindex="0"><div class="task-node-head"><b>${esc(node.data.id)}</b><span>${esc(label(node.data.status))}</span></div><strong>${esc(node.data.objective)}</strong><small>${esc((node.data.assignedTo ?? []).join(', ') || 'Unassigned')}</small></div>`;
+  if (node.type === 'meeting') return `<div class="graph-card meeting-card" role="button" tabindex="0"><div class="meeting-symbol">◉</div><div><strong>${esc(node.data.title)}</strong><span>${esc(label(node.data.status))} · round ${node.data.currentRound}/${node.data.maxRounds}</span><small>${esc(node.data.linkedTask ?? 'Bounded coordination')}</small></div></div>`;
   const agent = node.data;
   return `<div class="graph-card agent-graph-card ${agent.function === 'DIRECTOR' ? 'director-card' : ''} status-${esc(agent.status.toLowerCase())}" role="button" tabindex="0"><div class="graph-agent-head"><div class="avatar ${agent.function === 'DIRECTOR' ? 'director' : ''}">${esc(initials(agent))}</div><div><strong>${esc(agent.name)}</strong><span>${esc(agent.title)}</span></div><b>${esc(agent.seniority ? `L${agent.level}` : '—')}</b></div><div class="graph-medium"><span class="activity-chip">${esc(activityIcon(agent.activity))} ${esc(label(agent.activity))}</span><small>${esc(agent.currentTaskId ?? 'No active task')}</small><em>${esc(agent.model || 'Auto')}</em></div><div class="graph-near"><span>${esc(agent.provider)} · ${esc(agent.authMode)}</span><span>${number(agent.usage?.totalTokens)} tokens</span></div></div>`;
 }
@@ -365,7 +400,8 @@ function renderGraph(preserveViewport = true) {
   const edgesElement = $('#graph-edges');
   nodesElement.replaceChildren();
   edgesElement.replaceChildren();
-  const sizes = new Map(graph.nodes.map(node => [node.id, node.type === 'god' ? [190,78] : node.type === 'task' ? [240,98] : [230,112]]));
+  const activeMeetingAgents = new Set((snapshot.meetings ?? []).filter(item => item.status === 'RUNNING').flatMap(item => item.participants.map(person => person.agentId)));
+  const sizes = new Map(graph.nodes.map(node => [node.id, node.type === 'god' ? [190,78] : node.type === 'task' ? [240,98] : node.type === 'meeting' ? [240,82] : [230,112]]));
   const byId = new Map(graph.nodes.map(node => [node.id, node]));
   const svgNs = 'http://www.w3.org/2000/svg';
   for (const edge of graph.edges) {
@@ -403,6 +439,7 @@ function renderGraph(preserveViewport = true) {
     foreign.dataset.nodeId = node.id;
     foreign.classList.toggle('selected', graphState.selectedId === node.id);
     foreign.classList.toggle('search-hit', graphState.query && searchableText(node).includes(graphState.query));
+    foreign.classList.toggle('meeting-participant-active', node.type === 'agent' && activeMeetingAgents.has(node.id));
     foreign.innerHTML = graphNodeHtml(node);
     const activate = () => selectGraphNode(node);
     foreign.addEventListener('click', activate);
@@ -446,6 +483,7 @@ function selectGraphNode(node) {
   inspectorTab = 'overview';
   if (node.type === 'agent') renderInspector(node.data);
   else if (node.type === 'task') renderTaskInspector(node.data);
+  else if (node.type === 'meeting') { selectedMeetingId = node.data.id; switchView('meetings'); renderMeetings(); }
   else renderProjectInspector();
   renderGraph(true);
 }
@@ -631,6 +669,23 @@ function populateRelationshipForm() {
   $('#relationship-form-error').textContent = '';
 }
 
+function populateMeetingForm() {
+  const form = $('#meeting-form');
+  form.elements.participants.innerHTML = snapshot.agents.filter(agent => !['TERMINATED','BLOCKED'].includes(agent.status)).map(agent => `<option value="${esc(agent.id)}">${esc(agent.name)} · ${esc(agent.title)}</option>`).join('');
+  form.elements.linkedTask.innerHTML = '<option value="">None</option>' + snapshot.tasks.filter(task => !['COMPLETED','CANCELLED'].includes(task.status)).map(task => `<option value="${esc(task.id)}">${esc(task.id)} · ${esc(task.objective)}</option>`).join('');
+  $('#meeting-form-error').textContent = '';
+  updateMeetingBudgetEstimate();
+}
+
+function updateMeetingBudgetEstimate() {
+  const form = $('#meeting-form');
+  const participants = [...form.elements.participants.selectedOptions].length;
+  const rounds = Number(form.elements.maxRounds.value || 2);
+  const response = Number(form.elements.responseTokens.value || 800);
+  const ceiling = participants * rounds * response;
+  $('#meeting-budget-estimate').textContent = participants ? `Response ceiling: ${number(ceiling)} tokens; total meeting cap: ${number(Number(form.elements.totalTokens.value || 8000))}.` : 'Select participants to calculate the bounded response ceiling.';
+}
+
 function switchView(view) {
   $$('.view').forEach(section => section.classList.toggle('active', section.id === `view-${view}`));
   $$('.nav-item').forEach(item => item.classList.toggle('active', item.dataset.view === view));
@@ -643,6 +698,7 @@ function switchView(view) {
     requestAnimationFrame(() => { renderGraph(true); if (!graphState.fitted) fitGraph(); });
   }
   if (view === 'resources') renderResources();
+  if (view === 'meetings') renderMeetings();
   if (view === 'decisions' || view === 'settings') renderGovernance();
 }
 
@@ -734,7 +790,7 @@ async function boot() {
     const loaded = await Promise.all([loadSnapshot(), loadProviders(), loadDaemonState()]);
     [snapshot, providers] = loaded;
     renderRuntimeState(loaded[2]);
-    renderOverview(); renderTasks(); renderProviders(); renderResources(); renderFilters(); renderGovernance(); renderGraph(true);
+    renderOverview(); renderTasks(); renderMeetings(); renderProviders(); renderResources(); renderFilters(); renderGovernance(); renderGraph(true);
     graphState.fitted = false;
     $('#blocker-count').textContent = snapshot.project.blockedTasks ?? 0;
     const listen = window.__TAURI__?.event?.listen;
@@ -743,7 +799,7 @@ async function boot() {
       refreshTimer = setTimeout(async () => {
         try {
           snapshot = await loadSnapshot();
-          renderOverview(); renderTasks(); renderResources(); renderFilters(); renderGovernance(); renderGraph(true);
+          renderOverview(); renderTasks(); renderMeetings(); renderResources(); renderFilters(); renderGovernance(); renderGraph(true);
           if (graphState.selectedId) {
             const agent = snapshot.agents.find(item => item.id === graphState.selectedId);
             if (agent) renderInspector(agent);
@@ -806,6 +862,27 @@ $('#toggle-org-edit').addEventListener('click', event => {
   if (agent) renderInspector(agent);
 });
 $('#create-agent').addEventListener('click', () => { populateAgentForm(); $('#agent-dialog').showModal(); });
+$('#create-meeting').addEventListener('click', () => { populateMeetingForm(); $('#meeting-dialog').showModal(); });
+['participants','maxRounds','responseTokens','totalTokens'].forEach(name => $('#meeting-form').elements[name].addEventListener('change', updateMeetingBudgetEstimate));
+$('#meeting-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!invoke) return window.alert('Meeting creation is available in the desktop app.');
+  const form = event.currentTarget;
+  const participants = [...form.elements.participants.selectedOptions].map(option => option.value);
+  if (!participants.length) { $('#meeting-form-error').textContent = 'Choose at least one participant.'; return; }
+  const request = {
+    title:form.elements.title.value.trim(), objective:form.elements.objective.value.trim(),
+    agenda:form.elements.agenda.value.split('\n').map(item => item.trim()).filter(Boolean), participants,
+    requiredRoles:[], requiredCapabilities:{}, closureOwner:null,
+    maxRounds:Number(form.elements.maxRounds.value), perResponseTokenLimit:Number(form.elements.responseTokens.value),
+    totalMeetingTokenBudget:Number(form.elements.totalTokens.value), linkedTask:form.elements.linkedTask.value || null,
+    linkedDecision:null, trigger:'MANUAL'
+  };
+  const button=form.querySelector('[type="submit"]'); button.disabled=true;
+  try { const meeting=await invoke('create_meeting',{request}); selectedMeetingId=meeting.id; form.reset(); $('#meeting-dialog').close(); await refreshSnapshot(); switchView('meetings'); }
+  catch(error) { $('#meeting-form-error').textContent=String(error); }
+  finally { button.disabled=false; }
+});
 $('#add-relationship').addEventListener('click', () => { populateRelationshipForm(); $('#relationship-dialog').showModal(); });
 $$('[data-close-dialog]').forEach(button => button.addEventListener('click', () => button.closest('dialog').close()));
 $('#capability-form').addEventListener('submit', async event => {

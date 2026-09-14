@@ -137,15 +137,6 @@ pub enum ReviewOutcomeKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum MeetingStatus {
-    Proposed,
-    Active,
-    Completed,
-    Cancelled,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ProtectedOperation {
     ProductionDeployment,
     CreateGithubIssue,
@@ -184,6 +175,8 @@ pub struct ProjectGovernancePolicy {
     pub automatic_safe_github_merge: bool,
     #[serde(default = "default_provider_approval_timeout")]
     pub provider_approval_timeout_seconds: u64,
+    #[serde(default)]
+    pub meetings: super::meetings::MeetingPolicy,
     #[serde(flatten)]
     pub legacy: serde_json::Map<String, Value>,
 }
@@ -202,6 +195,7 @@ impl Default for ProjectGovernancePolicy {
             production_deploy_requires_god: true,
             automatic_safe_github_merge: false,
             provider_approval_timeout_seconds: default_provider_approval_timeout(),
+            meetings: super::meetings::MeetingPolicy::default(),
             legacy: serde_json::Map::new(),
         }
     }
@@ -489,17 +483,8 @@ pub struct TaskHandoff {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct OrganizationMeeting {
-    pub id: String,
-    pub title: String,
-    pub participants: Vec<String>,
-    pub status: MeetingStatus,
-    pub agenda: Vec<String>,
-    pub outcomes: Vec<String>,
-    pub created_at: String,
-}
+/// Backward-compatible name for the former typed meeting foundation.
+pub type OrganizationMeeting = super::meetings::Meeting;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -2240,6 +2225,15 @@ fn validate_policy(policy: &ProjectGovernancePolicy) -> Result<()> {
     if !(1..=3600).contains(&policy.provider_approval_timeout_seconds) {
         return Err(RuntimeError::Governance(
             "provider approval timeout must be between 1 and 3600 seconds".into(),
+        ));
+    }
+    if !(1..=12).contains(&policy.meetings.max_participants)
+        || !(1..=4).contains(&policy.meetings.max_rounds)
+        || !(1..=8_192).contains(&policy.meetings.max_response_tokens)
+        || !(1..=100_000).contains(&policy.meetings.max_tokens)
+    {
+        return Err(RuntimeError::Governance(
+            "meeting policy exceeds the system safety ceiling (12 participants, 4 rounds, 8192 response tokens, 100000 total tokens)".into(),
         ));
     }
     let allowed = policy

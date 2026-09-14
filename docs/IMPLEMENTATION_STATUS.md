@@ -25,8 +25,9 @@
 - Official Rust SDK-based Director MCP stdio control plane with structured output and legacy tool names
 - Per-project Rust daemon with one `BataiApplication`, one SQLite writer and concurrent Desktop/MCP/HTTP clients
 - Versioned, project-bound authenticated local RPC with OS-vault credentials, actor isolation, bounded event fan-out and restart-persistent mutation deduplication
+- Daemon-owned bounded Meeting Engine with persisted turns, independent parallel positions, conditional disagreement round, economic routing, hard token/participant ceilings, action-to-task links and conservative crash recovery
 
-Automated suites at the time of this snapshot: **183 passing Rust tests** and **42 passing Node compatibility/UI tests**.
+Automated suites at the time of this snapshot: **193 passing Rust tests** and **43 passing Node compatibility/UI tests**.
 
 ## Implemented and smoke-tested at protocol/process level
 
@@ -83,7 +84,7 @@ Automated suites at the time of this snapshot: **183 passing Rust tests** and **
 - Task-scoped/project/permanent lifecycle, policy-aware Agent Factory, soft termination, one-Director and hierarchy invariants.
 - Persistent collaboration/review/advisory relationships, external organization file watcher, append-only audit and restart-safe mutation-bound GOD decisions.
 - Separate per-request provider approval ledger with official protocol identity, interactive `Allow once`/`Deny`, bounded expiry, headless fail-closed behavior, cancellation and restart orphaning.
-- Explicit review outcomes and evidence-backed review acceptance metrics, plus typed handoff/meeting foundations.
+- Explicit review outcomes, evidence-backed review acceptance metrics and a real bounded multi-agent Meeting Engine.
 - Organization Edit mode, create-agent and relationship forms, explicit mutation confirmations, Decision Ledger, provider approval queue and policy Settings.
 - Existing deterministic approval/recovery tests, explicit opt-in authenticated Codex smoke and real inference/worktree acceptance remain intact.
 - Typed Economic Intelligence resources, billing/terms profiles, capability evidence and deterministic quota-aware routing with durable decision audit.
@@ -98,7 +99,7 @@ Automated suites at the time of this snapshot: **183 passing Rust tests** and **
 - Rust-native GitHub delivery with official `gh` authentication/repository binding, typed issues/PRs/reviews/checks, issue-task links, isolated commit/push, PR idempotence, durable CI refresh, SHA-bound merge governance and remote saga recovery.
 - Task delivery timeline and PR inspector with explicit merge controls; required delivery pauses task completion until a merged PR is observed.
 - Node GitHub/worktree/HTTP/MCP code is no longer used by production entry points; remaining Node files are compatibility-test references documented in `NODE_RETIREMENT.md`.
-- One hundred eighty-three Rust library tests, including HTTP security, official MCP lifecycle/tool calls, one-owner startup races, concurrent client access, actor isolation, event fan-out, recovery gating, authenticated shutdown and restart-persistent request deduplication.
+- One hundred ninety-three Rust library tests, including meeting bounds/resource gates/recovery/task integration, HTTP security, official MCP lifecycle/tool calls, one-owner startup races, concurrent client access, actor isolation, event fan-out, recovery gating, authenticated shutdown and restart-persistent request deduplication.
 - Manual UI smoke at 1440x900 and 1100x720 with no JavaScript console errors.
 
 The external production control plane is Rust-native and daemon-owned. Closing Desktop or MCP no longer shuts down the project organization. Node remains only for compatibility fixtures and migration tests.
@@ -106,7 +107,7 @@ The external production control plane is Rust-native and daemon-owned. Closing D
 ## Next engineering milestones
 
 1. Run an opt-in longitudinal calibration pilot with reviewed production tasks, then tune thresholds through the suggestion/replay workflow.
-2. Implement meeting scheduling, event-derived temporary graph groups and automatic safe summaries on the typed meeting foundation.
+2. Add explicit meeting scheduling/queueing and post-approval PAYG resume without weakening current no-replay recovery rules.
 3. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
 4. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.
 5. Add controlled daemon restart/upgrade handoff and an optional idle-exit policy that checks active runtime work before shutdown.

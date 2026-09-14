@@ -23,6 +23,16 @@ const snapshot = {
   hierarchyWarnings:['ORPHAN:iris:missing']
 };
 
+test('running meetings appear as temporary organization groups', () => {
+  const graph = buildHierarchyGraph({...snapshot, meetings:[{
+    id:'MTG-1', title:'Architecture review', status:'RUNNING', currentRound:1, maxRounds:2,
+    participants:[{agentId:'nova'},{agentId:'iris'}]
+  }]});
+  assert.ok(graph.nodes.some(node => node.id === 'meeting:MTG-1' && node.type === 'meeting'));
+  assert.ok(graph.edges.some(edge => edge.source === 'nova' && edge.target === 'meeting:MTG-1' && edge.type === 'COLLABORATION'));
+  assert.ok(graph.edges.some(edge => edge.source === 'iris' && edge.target === 'meeting:MTG-1'));
+});
+
 test('hierarchy graph follows reporting data and keeps orphan safe', () => {
   const graph = buildHierarchyGraph(snapshot);
   assert.equal(graph.nodes[0].id, 'god');

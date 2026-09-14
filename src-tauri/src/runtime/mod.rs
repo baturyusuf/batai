@@ -9,6 +9,7 @@ pub mod execution_provider;
 pub mod governance;
 pub mod hardware;
 pub mod learning;
+pub mod meetings;
 pub mod migrations;
 pub mod organization;
 pub mod recovery;
@@ -40,6 +41,7 @@ use errors::Result;
 use events::EventEngine;
 use execution_provider::{ExecutionProvider, MockProvider};
 use governance::GovernanceService;
+use meetings::MeetingEngine;
 use organization::{hierarchy_warnings, OrganizationRelationship, RelationshipType};
 use recovery::RecoveryEngine;
 use scheduler::DurableScheduler;
@@ -57,6 +59,7 @@ pub struct BataiRuntime {
     pub sessions: SessionManager,
     pub governance: GovernanceService,
     pub delivery: delivery::DeliveryService,
+    pub meetings: Arc<MeetingEngine>,
     watcher: Mutex<Option<TaskWatcher>>,
     organization_watcher: Mutex<Option<OrganizationWatcher>>,
     scheduler: tokio::sync::Mutex<Option<DurableScheduler>>,
@@ -188,6 +191,15 @@ impl BataiRuntime {
             task_engine = task_engine.with_worktrees(manager);
         }
         let tasks = Arc::new(task_engine);
+        let meetings = Arc::new(MeetingEngine::new(
+            root.clone(),
+            store.clone(),
+            events.clone(),
+            agents.clone(),
+            sessions.clone(),
+            Arc::clone(&tasks),
+            governance.clone(),
+        ));
         Ok(Arc::new(Self {
             root,
             store,
@@ -197,6 +209,7 @@ impl BataiRuntime {
             sessions,
             governance,
             delivery,
+            meetings,
             watcher: Mutex::new(None),
             organization_watcher: Mutex::new(None),
             scheduler: tokio::sync::Mutex::new(None),
@@ -208,6 +221,7 @@ impl BataiRuntime {
         self.delivery.reconcile_startup()?;
         self.store.reconcile_interrupted()?;
         self.load_agents()?;
+        self.meetings.reconcile_startup()?;
         let watcher = TaskWatcher::start(
             &self.root.join(".batai/tasks"),
             Arc::clone(&self.tasks),
@@ -246,6 +260,7 @@ impl BataiRuntime {
 
     pub async fn shutdown(&self) -> Result<()> {
         self.governance.shutdown_approvals();
+        self.meetings.shutdown().await?;
         let watcher = self
             .watcher
             .lock()
@@ -631,6 +646,11 @@ impl BataiRuntime {
         let deliveries = self.store.list_delivery_checkpoints()?;
         let external_links = self.store.list_external_links(None)?;
         let remote_operations = self.store.list_remote_operations(100)?;
+        let meetings = self.meetings.list()?;
+        let meeting_turns = meetings
+            .iter()
+            .map(|meeting| Ok((meeting.id.clone(), self.meetings.turns(&meeting.id)?)))
+            .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
         Ok(AppSnapshot {
             god: GodView {
                 id: "god".into(),
@@ -669,6 +689,8 @@ impl BataiRuntime {
             deliveries,
             external_links,
             remote_operations,
+            meetings,
+            meeting_turns,
         })
     }
 }
@@ -680,6 +702,9 @@ fn enum_name<T: serde::Serialize>(value: T) -> Option<String> {
 }
 
 fn current_activity(agent: &types::Agent, event: Option<&types::RuntimeEvent>) -> String {
+    if event.is_some_and(|event| event.event_type == types::EventType::MeetingParticipantStarted) {
+        return "MEETING".into();
+    }
     if agent.status == types::AgentStatus::Blocked {
         return "BLOCKED".into();
     }

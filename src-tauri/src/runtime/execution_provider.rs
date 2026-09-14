@@ -211,6 +211,7 @@ pub trait ExecutionProvider: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum MockOutcome {
     Success,
+    Result(String),
     Delay(Duration),
     Failure(String),
     RateLimited(Option<String>),
@@ -304,6 +305,26 @@ impl ExecutionProvider for MockProvider {
             .unwrap_or(MockOutcome::Success);
         match outcome {
             MockOutcome::Success => {}
+            MockOutcome::Result(summary) => {
+                return Ok(ProviderExecutionResult {
+                    provider: self.name().into(),
+                    model: agent.model.clone(),
+                    agent_id: agent.id.clone(),
+                    task_id: task.id.clone(),
+                    session_id: session_id.into(),
+                    turn_id: Some(format!("TURN-{}", uuid::Uuid::new_v4())),
+                    status: ProviderExecutionStatus::Completed,
+                    summary,
+                    artifacts: vec![],
+                    changed_files: vec![],
+                    usage: UsageSnapshot::default(),
+                    started_at,
+                    completed_at: chrono::Utc::now().to_rfc3339(),
+                    execution_mode: ExecutionMode::ActionManifest,
+                    provider_metadata: serde_json::json!({"mock":true}),
+                    session_metadata: serde_json::json!({"mock":true}),
+                });
+            }
             MockOutcome::Delay(delay) => tokio::time::sleep(delay).await,
             MockOutcome::Failure(message) => return Err(ProviderFailure::Execution(message)),
             MockOutcome::RateLimited(reset_at) => {

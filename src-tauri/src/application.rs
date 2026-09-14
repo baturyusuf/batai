@@ -25,6 +25,7 @@ use crate::{
             Actor, AuthorityScope, CreateAgentRequest, MutationDisposition, MutationRequest,
             MutationResult, OrganizationMutation, ProtectedOperation,
         },
+        meetings::{CreateMeetingRequest, Meeting},
         organization::{legacy_identity, AgentLifecycle, AuthorityRole, Seniority},
         recovery::RecoveryEngine,
         types::{Task, TaskExecution, TaskStatus, TaskSuccessAction},
@@ -470,6 +471,39 @@ impl BataiApplication {
 
     pub fn get_task(&self, task_id: &str) -> Result<Option<Task>> {
         self.runtime.store.get_task(task_id)
+    }
+
+    pub fn create_meeting(
+        self: &Arc<Self>,
+        actor: Actor,
+        request: CreateMeetingRequest,
+    ) -> Result<Meeting> {
+        self.runtime.meetings.create(actor, request)
+    }
+
+    pub fn get_meeting(&self, meeting_id: &str) -> Result<Option<Meeting>> {
+        self.runtime.meetings.get(meeting_id)
+    }
+
+    pub fn list_meetings(&self) -> Result<Vec<Meeting>> {
+        self.runtime.meetings.list()
+    }
+
+    pub async fn cancel_meeting(&self, actor: Actor, meeting_id: &str) -> Result<Meeting> {
+        self.runtime.meetings.cancel(actor, meeting_id).await
+    }
+
+    pub async fn create_meeting_action_task(
+        &self,
+        actor: Actor,
+        meeting_id: &str,
+        action_id: &str,
+        assigned_to: Vec<String>,
+    ) -> Result<Task> {
+        self.runtime
+            .meetings
+            .create_action_task(actor, meeting_id, action_id, assigned_to)
+            .await
     }
 
     pub fn get_delivery(&self, task_id: &str) -> Result<Option<DeliveryCheckpoint>> {
