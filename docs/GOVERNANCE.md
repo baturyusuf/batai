@@ -53,6 +53,8 @@ Headless execution, an unavailable UI, an out-of-worktree target or a policy den
 
 Provider approval does not disable workspace sandboxing or Batai policy. It authorizes one observable provider operation, not an organizational mutation and not future requests. Credential-like fields and suspicious bearer/key strings are redacted before persistence. Hidden reasoning is never part of the approval record.
 
+Meeting PAYG decisions are bound to one meeting operation, resource, provider, model, policy revision, configuration fingerprint and maximum token scope. They never create a permanent allow rule. Resolution is delivered through the daemon event engine; a policy change supersedes an open gate immediately, changed bindings invalidate a resolved approval, and rejection permits only a new eligibility pass with PAYG disabled.
+
 Every mutation attempt records actor, resolved authority, action, target, outcome, reason, task/decision linkage and organization revision. Recovery writes separate human-readable `RECOVERED`, `ROLLED_BACK` or `RECOVERY_REQUIRED` audit outcomes. The journal remains a recovery mechanism rather than audit history; audit storage is append-only and has no update or delete API.
 
 ## Intelligence, memory and review

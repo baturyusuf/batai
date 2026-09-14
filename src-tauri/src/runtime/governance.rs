@@ -334,6 +334,13 @@ impl OrganizationMutation {
             Self::RequestProtectedAction { target, .. } => Some(target),
         }
     }
+
+    pub(crate) fn protected_detail(&self) -> Option<&Value> {
+        match self {
+            Self::RequestProtectedAction { detail, .. } => Some(detail),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -778,6 +785,42 @@ impl GovernanceService {
             decision_id: Some(decision.id),
             ..result
         })
+    }
+
+    pub(crate) fn supersede_open_decision(&self, decision_id: &str, note: String) -> Result<bool> {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .map_err(|_| RuntimeError::Lock("governance mutation"))?;
+        let mut decisions: Vec<GodDecision> = self.store.list_governance_records("GOD_DECISION")?;
+        let Some(mut decision) = decisions
+            .drain(..)
+            .find(|decision| decision.id == decision_id)
+        else {
+            return Ok(false);
+        };
+        if decision.status != DecisionStatus::Open {
+            return Ok(false);
+        }
+        decision.status = DecisionStatus::Superseded;
+        decision.resolved_at = Some(now());
+        decision.resolution_note = Some(note);
+        self.persist_decision(&decision)?;
+        self.events.publish(
+            EventType::DecisionResolved,
+            "governance",
+            Some(decision.id.clone()),
+            decision.request.task_id.clone(),
+            serde_json::json!({"status":"SUPERSEDED"}),
+        )?;
+        self.audit(
+            &decision.request,
+            AuthorityRole::God,
+            MutationDisposition::Denied,
+            Some(&decision.id),
+            self.load_organization()?.revision,
+        )?;
+        Ok(true)
     }
 
     pub fn request_provider_approval(
@@ -2234,6 +2277,17 @@ fn validate_policy(policy: &ProjectGovernancePolicy) -> Result<()> {
     {
         return Err(RuntimeError::Governance(
             "meeting policy exceeds the system safety ceiling (12 participants, 4 rounds, 8192 response tokens, 100000 total tokens)".into(),
+        ));
+    }
+    let context = &policy.meetings.context_budget;
+    if !(1..=64_000).contains(&context.max_tokens)
+        || !(1..=64).contains(&context.max_files)
+        || !(1..=524_288).contains(&context.max_bytes_per_file)
+        || !(1..=2_097_152).contains(&context.max_total_bytes)
+        || context.max_historical_artifacts > 64
+    {
+        return Err(RuntimeError::Governance(
+            "context policy exceeds the system safety ceiling (64000 tokens, 64 files, 512 KiB/file, 2 MiB total, 64 historical artifacts)".into(),
         ));
     }
     let allowed = policy

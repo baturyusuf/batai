@@ -2,6 +2,8 @@
 
 Batai meetings are short coordination operations, not open-ended agent chat rooms. The per-project Rust daemon owns the Meeting Engine, its SQLite records, provider turns and live events. Closing Desktop or an MCP bridge does not stop a running meeting.
 
+Meeting prompts consume the shared bounded [Context Builder](CONTEXT_BUILDER.md). Each participant receives common task/directive evidence plus a role-specific source package with provenance, safety exclusions and a stable fingerprint. Round-one packages never include peer positions.
+
 ## Domain and limits
 
 A meeting records its title, structured agenda, objective, organizer, organizational participants, capability/role requirements, closure owner, optional task/decision links, trigger, timestamps, status, usage and typed outcome. Status moves through `PLANNED`, `READY`, `RUNNING`, `PAUSED`, `BLOCKED`, `COMPLETED`, `CANCELLED` or `FAILED`.
@@ -22,7 +24,7 @@ Closure is deterministic and occurs exactly once. It preserves minority disagree
 
 Workers cannot create meetings. Directors may create them only when project policy allows; Leads are denied by default. GOD remains subject to system safety ceilings. A meeting-triggered meeting is rejected to prevent recursive coordination.
 
-AUTO participants use the existing Economic Router at the attempt boundary. Explicit agents keep their configured intelligence after resource checks. Local and subscription sources are eligible according to current policy and availability. PAYG requires both general and meeting policy permission. A Director-owned meeting that reaches a PAYG-only choice creates an exact `PAYG_SPEND` GOD decision linked to the meeting and blocks; it never silently spends or switches mid-turn.
+AUTO participants use the existing Economic Router at the attempt boundary. Explicit agents keep their configured intelligence after resource checks. Local and subscription sources are eligible according to current policy and availability. PAYG requires both general and meeting policy permission. A PAYG-only choice creates a resource/model/policy-bound `PAYG_SPEND` GOD decision and blocks before inference. Decision resolution wakes the engine through runtime events: exact approval resumes at the pre-turn boundary, rejection reroutes with PAYG disabled, and a stale approval is superseded.
 
 ## Tasks, recovery and events
 

@@ -16,17 +16,24 @@ use chrono::Utc;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use tokio::sync::{watch, Semaphore};
+use tokio::task::JoinHandle;
 
 use super::{
     agents::AgentRegistry,
+    context::{
+        ContextBudget, ContextBuildRequest, ContextBuildStatus, ContextBuilder,
+        ContextOperationType, ContextPackage, ContextPackageRecord,
+    },
     economic::{BillingMode, QuotaAwareEconomicRouter, RoutingOutcome, TaskRequirements, TaskRisk},
     errors::{Result, RuntimeError},
     events::EventEngine,
     execution_provider::{ProviderExecutionResult, ProviderFailure, UsageSnapshot, UsageSource},
+    gates::{ExecutionGate, ExecutionGateStatus, ExecutionGateType},
     governance::{
-        Actor, AuthorityScope, GovernanceService, MutationDisposition, MutationRequest,
-        OrganizationMutation, ProtectedOperation,
+        Actor, AuthorityScope, DecisionStatus, GovernanceService, MutationDisposition,
+        MutationRequest, OrganizationMutation, ProtectedOperation,
     },
     organization::{AgentFunction, AuthorityRole, CapabilityProfile, ModelAssignment},
     sessions::SessionManager,
@@ -110,6 +117,7 @@ pub struct MeetingPolicy {
     pub allow_payg_for_meetings: bool,
     pub director_can_create: bool,
     pub lead_can_create: bool,
+    pub context_budget: ContextBudget,
 }
 
 impl Default for MeetingPolicy {
@@ -123,6 +131,7 @@ impl Default for MeetingPolicy {
             allow_payg_for_meetings: false,
             director_can_create: true,
             lead_can_create: false,
+            context_budget: ContextBudget::default(),
         }
     }
 }
@@ -143,6 +152,8 @@ pub struct CreateMeetingRequest {
     pub linked_task: Option<String>,
     pub linked_decision: Option<String>,
     pub trigger: MeetingTrigger,
+    pub explicit_files: Vec<String>,
+    pub context_budget: Option<ContextBudget>,
 }
 
 impl Default for CreateMeetingRequest {
@@ -161,6 +172,8 @@ impl Default for CreateMeetingRequest {
             linked_task: None,
             linked_decision: None,
             trigger: MeetingTrigger::Manual,
+            explicit_files: Vec::new(),
+            context_budget: None,
         }
     }
 }
@@ -211,6 +224,12 @@ pub struct MeetingTurn {
     pub created_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
+    #[serde(default)]
+    pub context_id: Option<String>,
+    #[serde(default)]
+    pub context_fingerprint: Option<String>,
+    #[serde(default)]
+    pub estimated_context_tokens: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -272,6 +291,16 @@ pub struct Meeting {
     pub result: Option<MeetingOutcome>,
     pub usage: MeetingUsage,
     pub recovery_note: Option<String>,
+    #[serde(default)]
+    pub explicit_files: Vec<String>,
+    #[serde(default)]
+    pub context_budget: ContextBudget,
+    #[serde(default)]
+    pub context_packages: Vec<ContextPackageRecord>,
+    #[serde(default)]
+    pub execution_gates: Vec<ExecutionGate>,
+    #[serde(default)]
+    pub payg_rejected: bool,
 }
 
 #[derive(Clone)]
@@ -283,10 +312,13 @@ pub struct MeetingEngine {
     sessions: SessionManager,
     tasks: Arc<TaskEngine>,
     governance: GovernanceService,
+    context: ContextBuilder,
     running: Arc<Mutex<HashSet<String>>>,
     payg_decision_claims: Arc<Mutex<HashSet<String>>>,
     provider_lanes: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     cancellations: Arc<Mutex<HashMap<String, watch::Sender<bool>>>>,
+    event_listener: Arc<Mutex<Option<JoinHandle<()>>>>,
+    event_listener_shutdown: watch::Sender<bool>,
 }
 
 impl MeetingEngine {
@@ -299,7 +331,9 @@ impl MeetingEngine {
         sessions: SessionManager,
         tasks: Arc<TaskEngine>,
         governance: GovernanceService,
+        context: ContextBuilder,
     ) -> Self {
+        let (event_listener_shutdown, _) = watch::channel(false);
         Self {
             root,
             store,
@@ -308,10 +342,13 @@ impl MeetingEngine {
             sessions,
             tasks,
             governance,
+            context,
             running: Default::default(),
             payg_decision_claims: Default::default(),
             provider_lanes: Default::default(),
             cancellations: Default::default(),
+            event_listener: Default::default(),
+            event_listener_shutdown,
         }
     }
 
@@ -332,11 +369,24 @@ impl MeetingEngine {
             matches!(
                 meeting.status,
                 MeetingStatus::Planned | MeetingStatus::Ready | MeetingStatus::Running
-            )
+            ) || (meeting.status == MeetingStatus::Blocked
+                && meeting
+                    .execution_gates
+                    .iter()
+                    .any(|gate| gate.status == ExecutionGateStatus::Waiting))
         }))
     }
 
     pub async fn shutdown(&self) -> Result<()> {
+        let _ = self.event_listener_shutdown.send(true);
+        if let Some(listener) = self
+            .event_listener
+            .lock()
+            .map_err(|_| RuntimeError::Lock("meeting event listener"))?
+            .take()
+        {
+            listener.abort();
+        }
         let active = self
             .list()?
             .into_iter()
@@ -353,6 +403,65 @@ impl MeetingEngine {
                     &id,
                 )
                 .await;
+        }
+        Ok(())
+    }
+
+    pub fn start_event_listener(self: &Arc<Self>) -> Result<()> {
+        let mut listener = self
+            .event_listener
+            .lock()
+            .map_err(|_| RuntimeError::Lock("meeting event listener"))?;
+        if listener.is_some() {
+            return Ok(());
+        }
+        let mut events = self.events.subscribe();
+        let mut shutdown = self.event_listener_shutdown.subscribe();
+        let engine = Arc::clone(self);
+        *listener = Some(tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    changed = shutdown.changed() => {
+                        if changed.is_err() || *shutdown.borrow() { break; }
+                    }
+                    event = events.recv() => {
+                        match event {
+                            Ok(event) if event.event_type == EventType::DecisionResolved => {
+                                if let Some(decision_id) = event.target.as_deref() {
+                                    let _ = engine.handle_decision_resolution(decision_id);
+                                }
+                            }
+                            Ok(event) if event.event_type == EventType::PolicyChanged => {
+                                let _ = engine.supersede_stale_policy_gates();
+                            }
+                            Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                }
+            }
+        }));
+        Ok(())
+    }
+
+    fn supersede_stale_policy_gates(&self) -> Result<()> {
+        let current_revision = self.governance.snapshot()?.revision;
+        let decision_ids = self
+            .store
+            .list_meetings()?
+            .into_iter()
+            .flat_map(|meeting| meeting.execution_gates)
+            .filter(|gate| {
+                gate.status == ExecutionGateStatus::Waiting
+                    && gate.expected_policy_revision != current_revision
+            })
+            .filter_map(|gate| gate.decision_id)
+            .collect::<Vec<_>>();
+        for decision_id in decision_ids {
+            self.governance.supersede_open_decision(
+                &decision_id,
+                "project policy changed while the exact execution gate was waiting".into(),
+            )?;
         }
         Ok(())
     }
@@ -434,6 +543,11 @@ impl MeetingEngine {
             result: None,
             usage: MeetingUsage::default(),
             recovery_note: None,
+            explicit_files: request.explicit_files,
+            context_budget: request.context_budget.unwrap_or(policy.context_budget),
+            context_packages: Vec::new(),
+            execution_gates: Vec::new(),
+            payg_rejected: false,
         };
         self.store.upsert_meeting(&meeting)?;
         self.governance.audit_delivery(
@@ -481,6 +595,25 @@ impl MeetingEngine {
         Ok(())
     }
 
+    fn start_after_gate(self: &Arc<Self>, meeting_id: &str) {
+        let engine = Arc::clone(self);
+        let id = meeting_id.to_owned();
+        tokio::spawn(async move {
+            for _ in 0..200 {
+                let active = engine
+                    .running
+                    .lock()
+                    .map(|running| running.contains(&id))
+                    .unwrap_or(true);
+                if !active {
+                    let _ = engine.start_background(&id);
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        });
+    }
+
     pub async fn cancel(&self, actor: Actor, meeting_id: &str) -> Result<Meeting> {
         self.authorize_actor(&actor)?;
         let mut meeting = self.required_meeting(meeting_id)?;
@@ -521,6 +654,23 @@ impl MeetingEngine {
 
     pub fn reconcile_startup(self: &Arc<Self>) -> Result<()> {
         for mut meeting in self.store.list_meetings()? {
+            if meeting.status == MeetingStatus::Blocked
+                && meeting
+                    .execution_gates
+                    .iter()
+                    .any(|gate| gate.status == ExecutionGateStatus::Waiting)
+            {
+                for decision_id in meeting
+                    .execution_gates
+                    .iter()
+                    .filter(|gate| gate.status == ExecutionGateStatus::Waiting)
+                    .filter_map(|gate| gate.decision_id.clone())
+                    .collect::<Vec<_>>()
+                {
+                    self.handle_decision_resolution(&decision_id)?;
+                }
+                continue;
+            }
             if meeting.status != MeetingStatus::Running && meeting.status != MeetingStatus::Ready {
                 continue;
             }
@@ -557,6 +707,111 @@ impl MeetingEngine {
                 self.store.upsert_meeting(&meeting)?;
                 self.start_background(&meeting.id)?;
             }
+        }
+        Ok(())
+    }
+
+    fn handle_decision_resolution(self: &Arc<Self>, decision_id: &str) -> Result<()> {
+        let Some(decision) = self
+            .governance
+            .snapshot()?
+            .decisions
+            .into_iter()
+            .find(|decision| decision.id == decision_id)
+        else {
+            return Ok(());
+        };
+        if decision.status == DecisionStatus::Open {
+            return Ok(());
+        }
+        let Some(mut meeting) = self.store.list_meetings()?.into_iter().find(|meeting| {
+            meeting.execution_gates.iter().any(|gate| {
+                gate.decision_id.as_deref() == Some(decision_id)
+                    && gate.status == ExecutionGateStatus::Waiting
+            })
+        }) else {
+            return Ok(());
+        };
+        let gate_index = meeting
+            .execution_gates
+            .iter()
+            .position(|gate| gate.decision_id.as_deref() == Some(decision_id))
+            .expect("matching gate");
+        let claim_key = format!(
+            "{}|{}|{}|{}",
+            meeting.id,
+            meeting.execution_gates[gate_index]
+                .resource_id
+                .as_deref()
+                .unwrap_or_default(),
+            meeting.execution_gates[gate_index]
+                .provider
+                .as_deref()
+                .unwrap_or_default(),
+            meeting.execution_gates[gate_index]
+                .model
+                .as_deref()
+                .unwrap_or_default()
+        );
+        self.payg_decision_claims
+            .lock()
+            .map_err(|_| RuntimeError::Lock("meeting PAYG decision claims"))?
+            .remove(&claim_key);
+        let stale = !self.gate_binding_is_current(
+            &meeting,
+            &meeting.execution_gates[gate_index],
+            &decision,
+        )?;
+        let now = Utc::now().to_rfc3339();
+        let gate = &mut meeting.execution_gates[gate_index];
+        gate.resolved_at = Some(now);
+        if stale {
+            gate.status = ExecutionGateStatus::Superseded;
+            gate.resolution_reason = Some(
+                "meeting, resource, or project policy changed while approval was pending".into(),
+            );
+            meeting.recovery_note = Some(
+                "Stale approval was not consumed; routing and context will be evaluated again"
+                    .into(),
+            );
+        } else if decision.status == DecisionStatus::Approved {
+            gate.status = ExecutionGateStatus::Approved;
+            gate.resolution_reason = Some("exact GOD decision approved".into());
+            meeting.recovery_note =
+                Some("GOD gate resolved; resuming from provider-safe boundary".into());
+        } else {
+            gate.status = ExecutionGateStatus::Rejected;
+            gate.resolution_reason = Some("GOD rejected the exact PAYG operation".into());
+            meeting.payg_rejected = true;
+            meeting.recovery_note =
+                Some("PAYG rejected; retrying eligibility with PAYG disabled".into());
+        }
+        if !self
+            .store
+            .list_meeting_turns(&meeting.id)?
+            .iter()
+            .any(|turn| turn.status == MeetingTurnStatus::UnknownAfterCrash)
+        {
+            meeting.status = MeetingStatus::Ready;
+            meeting.completed_at = None;
+        }
+        self.store.upsert_meeting(&meeting)?;
+        self.events.publish(
+            EventType::ExecutionGateResolved,
+            "meeting-gate",
+            Some(meeting.id.clone()),
+            meeting.linked_task.clone(),
+            json!({"meetingId":meeting.id,"decisionId":decision_id,"gateStatus":meeting.execution_gates[gate_index].status}),
+        )?;
+        if meeting.status == MeetingStatus::Ready {
+            self.events.publish(
+                EventType::MeetingResumed,
+                "meeting-gate",
+                Some(meeting.id.clone()),
+                meeting.linked_task.clone(),
+                json!({"meetingId":meeting.id,"decisionId":decision_id}),
+            )?;
+            self.start_after_gate(&meeting.id);
         }
         Ok(())
     }
@@ -750,7 +1005,16 @@ impl MeetingEngine {
             .agents
             .get(&participant.agent_id)?
             .ok_or_else(|| RuntimeError::AgentNotFound(participant.agent_id.clone()))?;
-        let (routed, route_id, resource_id) = self.route_agent(meeting, &agent)?;
+        let mut context_package = self.build_participant_context(meeting, &agent)?;
+        if context_package.status == ContextBuildStatus::Blocked {
+            return Err(RuntimeError::Governance(format!(
+                "required meeting context is blocked: {}",
+                context_package.warnings.join("; ")
+            )));
+        }
+        self.record_context_package(meeting, &mut context_package)?;
+        let (routed, route_id, resource_id) =
+            self.route_agent(meeting, &agent, &context_package.fingerprint)?;
         agent = routed;
         let provider_lane = self.provider_lane(&agent, resource_id.as_deref())?;
         let _provider_permit = if let Some(lane) = provider_lane {
@@ -794,6 +1058,9 @@ impl MeetingEngine {
             created_at: now.clone(),
             started_at: Some(now),
             completed_at: None,
+            context_id: Some(context_package.context_id.clone()),
+            context_fingerprint: Some(context_package.fingerprint.clone()),
+            estimated_context_tokens: Some(context_package.estimated_tokens),
         };
         let session = self.sessions.ensure(&agent).await?;
         turn.provider_session_id = Some(session.provider_session_id.clone());
@@ -805,7 +1072,7 @@ impl MeetingEngine {
             meeting.linked_task.clone(),
             json!({"meetingId":meeting.id,"round":round,"kind":kind,"activity":"MEETING","resourceId":resource_id,"routingDecisionId":route_id}),
         )?;
-        let task = meeting_task(meeting, &agent, round, kind, context);
+        let task = meeting_task(meeting, &agent, round, kind, &context_package, context);
         let provider = self.sessions.provider_for(&agent)?;
         let outcome = tokio::select! {
             result = provider.send_task(&session.provider_session_id, &agent, &task) => result,
@@ -892,14 +1159,18 @@ impl MeetingEngine {
         &self,
         meeting: &Meeting,
         agent: &Agent,
+        context_fingerprint: &str,
     ) -> Result<(Agent, Option<String>, Option<String>)> {
         if agent.intelligence_policy.assignment != ModelAssignment::Auto {
-            self.validate_explicit_resource(meeting, agent)?;
+            self.validate_explicit_resource(meeting, agent, context_fingerprint)?;
             return Ok((agent.clone(), None, None));
         }
         let mut policy = self.store.economic_policy()?;
         let meeting_policy = self.governance.snapshot()?.policy.meetings;
         policy.allow_payg &= meeting_policy.allow_payg_for_meetings;
+        if meeting.payg_rejected {
+            policy.allow_payg = false;
+        }
         let function = agent
             .with_backfilled_organization()
             .function
@@ -908,7 +1179,7 @@ impl MeetingEngine {
             function,
             complexity: 55,
             risk: TaskRisk::Medium,
-            context_tokens: Some(meeting.per_response_token_limit.saturating_mul(4)),
+            context_tokens: Some(meeting.context_budget.max_tokens),
             required_capabilities: meeting.required_capabilities.clone(),
             requires_tools: false,
             requires_worktree: false,
@@ -937,17 +1208,6 @@ impl MeetingEngine {
             });
         }
         let resource_id = decision.selected_resource_id.clone();
-        if resource_id
-            .as_deref()
-            .and_then(|id| resources.iter().find(|r| r.id == id))
-            .is_some_and(|resource| resource.billing_mode == BillingMode::Payg)
-            && meeting.organizer != "god"
-        {
-            self.request_payg_decision(meeting, resource_id.as_deref())?;
-            return Err(RuntimeError::Governance(
-                "PAYG meeting execution requires a GOD-bound protected decision".into(),
-            ));
-        }
         let mut routed = agent.clone();
         routed.provider = decision.selected_provider.clone().unwrap_or_default();
         routed.model = decision.selected_model.clone().unwrap_or_default();
@@ -956,10 +1216,40 @@ impl MeetingEngine {
             .clone()
             .unwrap_or_else(|| "MEDIUM".into())
             .to_ascii_lowercase();
+        if let Some(resource) = resource_id
+            .as_deref()
+            .and_then(|id| resources.iter().find(|resource| resource.id == id))
+        {
+            if resource.billing_mode == BillingMode::Payg
+                && !self.has_approved_payg_gate(
+                    meeting,
+                    &resource.id,
+                    &routed.provider,
+                    &routed.model,
+                )
+            {
+                self.request_payg_decision(
+                    meeting,
+                    &resource.id,
+                    &routed.provider,
+                    &routed.model,
+                    Some(&decision.id),
+                    context_fingerprint,
+                )?;
+                return Err(RuntimeError::Governance(
+                    "PAYG meeting execution requires an exact GOD-bound decision".into(),
+                ));
+            }
+        }
         Ok((routed, Some(decision.id), resource_id))
     }
 
-    fn validate_explicit_resource(&self, meeting: &Meeting, agent: &Agent) -> Result<()> {
+    fn validate_explicit_resource(
+        &self,
+        meeting: &Meeting,
+        agent: &Agent,
+        context_fingerprint: &str,
+    ) -> Result<()> {
         let resources = self.store.list_intelligence_resources()?;
         if let Some(resource) = resources.iter().find(|r| r.provider == agent.provider) {
             if !matches!(resource.status.as_str(), "AVAILABLE" | "LOW" | "DEGRADED") {
@@ -970,16 +1260,34 @@ impl MeetingEngine {
                 });
             }
             if resource.billing_mode == BillingMode::Payg {
+                if meeting.payg_rejected {
+                    return Err(RuntimeError::Governance(
+                        "GOD rejected PAYG and this explicit provider has no automatic fallback"
+                            .into(),
+                    ));
+                }
                 let policy = self.governance.snapshot()?.policy;
                 if !policy.meetings.allow_payg_for_meetings || !policy.allow_payg {
                     return Err(RuntimeError::Governance(
                         "PAYG is disabled for meetings".into(),
                     ));
                 }
-                if meeting.organizer != "god" {
-                    self.request_payg_decision(meeting, Some(&resource.id))?;
+                if !self.has_approved_payg_gate(
+                    meeting,
+                    &resource.id,
+                    &agent.provider,
+                    &agent.model,
+                ) {
+                    self.request_payg_decision(
+                        meeting,
+                        &resource.id,
+                        &agent.provider,
+                        &agent.model,
+                        None,
+                        context_fingerprint,
+                    )?;
                     return Err(RuntimeError::Governance(
-                        "PAYG meeting execution requires a GOD-bound protected decision".into(),
+                        "PAYG meeting execution requires an exact GOD-bound decision".into(),
                     ));
                 }
             }
@@ -1021,24 +1329,226 @@ impl MeetingEngine {
         ))
     }
 
-    fn request_payg_decision(&self, meeting: &Meeting, resource_id: Option<&str>) -> Result<()> {
+    fn has_approved_payg_gate(
+        &self,
+        meeting: &Meeting,
+        resource_id: &str,
+        provider: &str,
+        model: &str,
+    ) -> bool {
+        meeting
+            .execution_gates
+            .iter()
+            .any(|gate| gate.matches_payg(resource_id, provider, model))
+    }
+
+    fn gate_binding_is_current(
+        &self,
+        meeting: &Meeting,
+        gate: &ExecutionGate,
+        decision: &super::governance::GodDecision,
+    ) -> Result<bool> {
+        let expected_revision = gate.expected_policy_revision;
+        let required_current_revision = if decision.status == DecisionStatus::Approved {
+            expected_revision.saturating_add(1)
+        } else {
+            expected_revision
+        };
+        if decision.request.expected_revision != expected_revision
+            || self.governance.snapshot()?.revision != required_current_revision
+            || decision.request.mutation.target() != Some(gate.operation_id.as_str())
+        {
+            return Ok(false);
+        }
+        let Some(detail) = decision.request.mutation.protected_detail() else {
+            return Ok(false);
+        };
+        let resources = self.store.list_intelligence_resources()?;
+        let resource_current = gate.resource_id.as_deref().is_some_and(|resource_id| {
+            resources.iter().any(|resource| {
+                resource.id == resource_id
+                    && resource.provider == gate.provider.as_deref().unwrap_or_default()
+                    && resource
+                        .supported_models
+                        .iter()
+                        .any(|model| model == gate.model.as_deref().unwrap_or_default())
+            })
+        });
+        let configuration_fingerprint = meeting_configuration_fingerprint(meeting);
+        Ok(resource_current
+            && detail.get("meetingId").and_then(Value::as_str) == Some(meeting.id.as_str())
+            && detail.get("resourceId").and_then(Value::as_str) == gate.resource_id.as_deref()
+            && detail.get("provider").and_then(Value::as_str) == gate.provider.as_deref()
+            && detail.get("model").and_then(Value::as_str) == gate.model.as_deref()
+            && detail.get("maximumMeetingTokens").and_then(Value::as_u64) == gate.maximum_tokens
+            && detail
+                .get("meetingConfigurationFingerprint")
+                .and_then(Value::as_str)
+                == Some(configuration_fingerprint.as_str()))
+    }
+
+    fn build_participant_context(
+        &self,
+        meeting: &Meeting,
+        agent: &Agent,
+    ) -> Result<ContextPackage> {
+        let worktree = agent
+            .worktree
+            .as_deref()
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir());
+        self.context.build(ContextBuildRequest {
+            operation: ContextOperationType::Meeting,
+            objective: meeting.objective.clone(),
+            actor: agent.clone(),
+            linked_task: meeting.linked_task.clone(),
+            linked_meeting: Some(meeting.id.clone()),
+            requested_capabilities: meeting.required_capabilities.keys().cloned().collect(),
+            repository: self.root.clone(),
+            worktree,
+            explicit_files: meeting.explicit_files.clone(),
+            budget: meeting.context_budget.clone(),
+        })
+    }
+
+    fn record_context_package(
+        &self,
+        meeting: &Meeting,
+        package: &mut ContextPackage,
+    ) -> Result<()> {
+        let mut persisted = self.required_meeting(&meeting.id)?;
+        let previous = persisted
+            .context_packages
+            .iter()
+            .rev()
+            .find(|record| record.actor_id == package.actor_id)
+            .cloned();
+        if let Some(previous) = &previous {
+            if previous.fingerprint == package.fingerprint {
+                package.context_id = previous.context_id.clone();
+                return Ok(());
+            }
+        }
+        let rebuilt = previous.is_some();
+        persisted.context_packages.push(package.record());
+        if persisted.context_packages.len() > 24 {
+            let remove = persisted.context_packages.len() - 24;
+            persisted.context_packages.drain(0..remove);
+        }
+        self.store.upsert_meeting(&persisted)?;
+        self.events.publish(
+            if rebuilt {
+                EventType::ContextRebuilt
+            } else {
+                EventType::ContextBuilt
+            },
+            package.actor_id.clone(),
+            Some(meeting.id.clone()),
+            meeting.linked_task.clone(),
+            json!({
+                "meetingId":meeting.id,
+                "contextId":package.context_id,
+                "fingerprint":package.fingerprint,
+                "estimatedTokens":package.estimated_tokens,
+                "warnings":package.warnings.len(),
+            }),
+        )?;
+        if !package.warnings.is_empty() {
+            self.events.publish(
+                EventType::ContextWarning,
+                package.actor_id.clone(),
+                Some(meeting.id.clone()),
+                meeting.linked_task.clone(),
+                json!({"meetingId":meeting.id,"contextId":package.context_id,"warnings":package.warnings}),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn request_payg_decision(
+        &self,
+        meeting: &Meeting,
+        resource_id: &str,
+        provider: &str,
+        model: &str,
+        routing_decision_id: Option<&str>,
+        context_fingerprint: &str,
+    ) -> Result<()> {
+        let claim_key = format!("{}|{resource_id}|{provider}|{model}", meeting.id);
         let mut claims = self
             .payg_decision_claims
             .lock()
             .map_err(|_| RuntimeError::Lock("meeting PAYG decision claims"))?;
-        if !claims.insert(meeting.id.clone()) {
+        if !claims.insert(claim_key) {
             return Ok(());
         }
         drop(claims);
-        if self
-            .store
-            .get_meeting(&meeting.id)?
-            .and_then(|value| value.linked_decision)
-            .is_some()
-        {
+        let mut persisted = self.required_meeting(&meeting.id)?;
+        if persisted.execution_gates.iter().any(|gate| {
+            matches!(
+                gate.status,
+                ExecutionGateStatus::Waiting | ExecutionGateStatus::Approved
+            ) && gate.resource_id.as_deref() == Some(resource_id)
+                && gate.provider.as_deref() == Some(provider)
+                && gate.model.as_deref() == Some(model)
+        }) {
             return Ok(());
         }
         let revision = self.governance.snapshot()?.revision;
+        let configuration_fingerprint = meeting_configuration_fingerprint(meeting);
+        let operation_id = format!("meeting:{}:payg", meeting.id);
+        let existing = self
+            .governance
+            .snapshot()?
+            .decisions
+            .into_iter()
+            .find(|decision| {
+                decision.request.mutation.target() == Some(operation_id.as_str())
+                    && matches!(
+                        decision.status,
+                        DecisionStatus::Open | DecisionStatus::Approved
+                    )
+                    && decision
+                        .request
+                        .mutation
+                        .protected_detail()
+                        .is_some_and(|detail| {
+                            detail.get("resourceId").and_then(Value::as_str) == Some(resource_id)
+                                && detail.get("provider").and_then(Value::as_str) == Some(provider)
+                                && detail.get("model").and_then(Value::as_str) == Some(model)
+                                && detail
+                                    .get("meetingConfigurationFingerprint")
+                                    .and_then(Value::as_str)
+                                    == Some(configuration_fingerprint.as_str())
+                        })
+            });
+        if let Some(decision) = existing {
+            persisted.linked_decision = Some(decision.id.clone());
+            persisted.execution_gates.push(ExecutionGate {
+                id: format!("GATE-{}", uuid::Uuid::new_v4()),
+                gate_type: ExecutionGateType::GodDecision,
+                status: if decision.status == DecisionStatus::Approved {
+                    ExecutionGateStatus::Approved
+                } else {
+                    ExecutionGateStatus::Waiting
+                },
+                operation_id,
+                safe_continuation_phase: "BEFORE_PROVIDER_TURN".into(),
+                decision_id: Some(decision.id),
+                resource_id: Some(resource_id.into()),
+                provider: Some(provider.into()),
+                model: Some(model.into()),
+                expected_policy_revision: decision.request.expected_revision,
+                maximum_tokens: Some(meeting.total_meeting_token_budget),
+                context_fingerprint: Some(context_fingerprint.into()),
+                routing_decision_id: routing_decision_id.map(str::to_owned),
+                created_at: Utc::now().to_rfc3339(),
+                resolved_at: None,
+                resolution_reason: Some("reconciled existing exact decision".into()),
+            });
+            self.store.upsert_meeting(&persisted)?;
+            return Ok(());
+        }
         let result = self.governance.mutate(MutationRequest {
             actor: Actor {
                 id: meeting.organizer.clone(),
@@ -1049,19 +1559,47 @@ impl MeetingEngine {
             reason: Some("A bounded meeting requires a PAYG intelligence resource".into()),
             mutation: OrganizationMutation::RequestProtectedAction {
                 operation: ProtectedOperation::PaygSpend,
-                target: format!("meeting:{}", meeting.id),
+                target: operation_id.clone(),
                 detail: json!({
                     "meetingId": meeting.id,
                     "resourceId": resource_id,
+                    "provider": provider,
+                    "model": model,
+                    "expectedPolicyRevision": revision,
                     "maximumMeetingTokens": meeting.total_meeting_token_budget,
+                    "meetingConfigurationFingerprint": configuration_fingerprint,
                     "scope": "MEETING_ONLY"
                 }),
             },
         })?;
         if let Some(decision_id) = result.decision_id {
-            let mut persisted = self.required_meeting(&meeting.id)?;
-            persisted.linked_decision = Some(decision_id);
+            persisted.linked_decision = Some(decision_id.clone());
+            persisted.execution_gates.push(ExecutionGate {
+                id: format!("GATE-{}", uuid::Uuid::new_v4()),
+                gate_type: ExecutionGateType::GodDecision,
+                status: ExecutionGateStatus::Waiting,
+                operation_id,
+                safe_continuation_phase: "BEFORE_PROVIDER_TURN".into(),
+                decision_id: Some(decision_id.clone()),
+                resource_id: Some(resource_id.into()),
+                provider: Some(provider.into()),
+                model: Some(model.into()),
+                expected_policy_revision: revision,
+                maximum_tokens: Some(meeting.total_meeting_token_budget),
+                context_fingerprint: Some(context_fingerprint.into()),
+                routing_decision_id: routing_decision_id.map(str::to_owned),
+                created_at: Utc::now().to_rfc3339(),
+                resolved_at: None,
+                resolution_reason: None,
+            });
             self.store.upsert_meeting(&persisted)?;
+            self.events.publish(
+                EventType::ExecutionGateOpened,
+                "meeting-engine",
+                Some(meeting.id.clone()),
+                meeting.linked_task.clone(),
+                json!({"meetingId":meeting.id,"decisionId":decision_id,"resourceId":resource_id,"phase":"BEFORE_PROVIDER_TURN"}),
+            )?;
         }
         Ok(())
     }
@@ -1101,6 +1639,9 @@ impl MeetingEngine {
             created_at: Utc::now().to_rfc3339(),
             started_at: Some(Utc::now().to_rfc3339()),
             completed_at: Some(Utc::now().to_rfc3339()),
+            context_id: None,
+            context_fingerprint: None,
+            estimated_context_tokens: None,
         };
         self.store.upsert_meeting_turn(&closure_turn)?;
         meeting.result = Some(result);
@@ -1122,6 +1663,9 @@ impl MeetingEngine {
     fn finish_with_error(&self, meeting: &mut Meeting, error: RuntimeError) -> Result<()> {
         if let Some(persisted) = self.store.get_meeting(&meeting.id)? {
             meeting.linked_decision = persisted.linked_decision;
+            meeting.context_packages = persisted.context_packages;
+            meeting.execution_gates = persisted.execution_gates;
+            meeting.payg_rejected = persisted.payg_rejected;
         }
         if matches!(error, RuntimeError::Cancelled(_)) {
             meeting.status = MeetingStatus::Cancelled;
@@ -1349,6 +1893,23 @@ fn validate_request(request: &CreateMeetingRequest, policy: &MeetingPolicy) -> R
             "meeting capability requirements must be between 0 and 100".into(),
         ));
     }
+    if let Some(context) = &request.context_budget {
+        let maximum = &policy.context_budget;
+        if context.max_tokens == 0
+            || context.max_files == 0
+            || context.max_bytes_per_file == 0
+            || context.max_total_bytes == 0
+            || context.max_tokens > maximum.max_tokens
+            || context.max_files > maximum.max_files
+            || context.max_bytes_per_file > maximum.max_bytes_per_file
+            || context.max_total_bytes > maximum.max_total_bytes
+            || context.max_historical_artifacts > maximum.max_historical_artifacts
+        {
+            return Err(RuntimeError::Governance(
+                "meeting context budget exceeds project policy".into(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1423,7 +1984,8 @@ fn meeting_task(
     agent: &Agent,
     round: u8,
     kind: MeetingTurnKind,
-    context: Option<String>,
+    context_package: &ContextPackage,
+    peer_context: Option<String>,
 ) -> Task {
     let phase = if kind == MeetingTurnKind::Position {
         "Give an independent position. Do not assume other participants' views."
@@ -1431,19 +1993,28 @@ fn meeting_task(
         "Respond only to the listed disagreements and open questions. Do not start new topics."
     };
     let objective = format!(
-        "Bounded Batai meeting contribution. Agenda: {}. Objective: {}. Your organizational role: {} — {}. {} Return concise user-visible JSON with position, agreements, disagreements, objections, open_questions, and action_items. Do not expose hidden reasoning. Do not mutate files. Maximum response tokens: {}. {}",
+        "Bounded Batai meeting contribution. Agenda: {}. Objective: {}. Your organizational role: {} — {}. {} Return concise user-visible JSON with position, agreements, disagreements, objections, open_questions, and action_items. Do not expose hidden reasoning. Do not mutate files. Maximum response tokens: {}.\n\nBOUNDED PROJECT CONTEXT\n{}\n\nROUND-SPECIFIC CONTEXT\n{}",
         meeting.agenda.join(" | "),
         meeting.objective,
         agent.name,
         agent.display_title(),
         phase,
         meeting.per_response_token_limit,
-        context.unwrap_or_default()
+        context_package.render(),
+        peer_context.unwrap_or_default()
     );
     let mut extra = serde_json::Map::new();
     extra.insert("meetingId".into(), Value::String(meeting.id.clone()));
     extra.insert("meetingRound".into(), Value::Number(round.into()));
     extra.insert("noFilesystemMutation".into(), Value::Bool(true));
+    extra.insert(
+        "contextId".into(),
+        Value::String(context_package.context_id.clone()),
+    );
+    extra.insert(
+        "contextFingerprint".into(),
+        Value::String(context_package.fingerprint.clone()),
+    );
     Task {
         id: format!("{}:R{}:{}", meeting.id, round, agent.id),
         created_by: "meeting-coordinator".into(),
@@ -1460,6 +2031,26 @@ fn meeting_task(
         weight: 0.0,
         extra,
     }
+}
+
+fn meeting_configuration_fingerprint(meeting: &Meeting) -> String {
+    let stable = json!({
+        "id": meeting.id,
+        "objective": meeting.objective,
+        "agenda": meeting.agenda,
+        "participants": meeting.participants.iter().map(|participant| &participant.agent_id).collect::<Vec<_>>(),
+        "requiredRoles": meeting.required_roles,
+        "requiredCapabilities": meeting.required_capabilities,
+        "maxRounds": meeting.max_rounds,
+        "responseTokens": meeting.per_response_token_limit,
+        "totalTokens": meeting.total_meeting_token_budget,
+        "contextBudget": meeting.context_budget,
+        "explicitFiles": meeting.explicit_files,
+    });
+    format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&stable).unwrap_or_default())
+    )
 }
 
 fn parse_contribution(summary: &str) -> MeetingContribution {
@@ -1758,8 +2349,9 @@ mod tests {
             sessions.clone(),
             Duration::from_secs(10),
         ));
+        let context = ContextBuilder::new(root.clone(), store.clone());
         Arc::new(MeetingEngine::new(
-            root, store, events, agents, sessions, tasks, governance,
+            root, store, events, agents, sessions, tasks, governance, context,
         ))
     }
 
@@ -1818,6 +2410,38 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("meeting did not finish")
+    }
+
+    async fn wait_until_completed(engine: &MeetingEngine, id: &str) -> Meeting {
+        for _ in 0..200 {
+            let meeting = engine.get(id).unwrap().unwrap();
+            if meeting.status == MeetingStatus::Completed {
+                return meeting;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("meeting did not resume and complete")
+    }
+
+    fn enable_payg_meetings(engine: &MeetingEngine) {
+        engine
+            .store
+            .upsert_intelligence_resource(&resource(BillingMode::Payg, Some(3)))
+            .unwrap();
+        let mut policy = engine.governance.snapshot().unwrap().policy;
+        policy.allow_payg = true;
+        policy.meetings.allow_payg_for_meetings = true;
+        let revision = policy.revision;
+        engine
+            .governance
+            .mutate(MutationRequest {
+                actor: actor("god"),
+                expected_revision: revision,
+                task_id: None,
+                reason: Some("test PAYG meeting gate".into()),
+                mutation: OrganizationMutation::UpdateProjectPolicy { policy },
+            })
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1944,24 +2568,7 @@ mod tests {
         drop(permit);
         assert!(lane.try_acquire_owned().is_ok());
 
-        engine
-            .store
-            .upsert_intelligence_resource(&resource(BillingMode::Payg, Some(3)))
-            .unwrap();
-        let mut policy = engine.governance.snapshot().unwrap().policy;
-        policy.allow_payg = true;
-        policy.meetings.allow_payg_for_meetings = true;
-        let revision = policy.revision;
-        engine
-            .governance
-            .mutate(MutationRequest {
-                actor: actor("god"),
-                expected_revision: revision,
-                task_id: None,
-                reason: Some("test PAYG meeting gate".into()),
-                mutation: OrganizationMutation::UpdateProjectPolicy { policy },
-            })
-            .unwrap();
+        enable_payg_meetings(&engine);
         let meeting = engine.create(actor("director"), request()).unwrap();
         let blocked = wait_terminal(&engine, &meeting.id).await;
         assert_eq!(blocked.status, MeetingStatus::Blocked);
@@ -1977,6 +2584,165 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn exact_payg_approval_resumes_and_does_not_duplicate_turns() {
+        let engine = setup(Arc::new(MockProvider::default()));
+        enable_payg_meetings(&engine);
+        engine.start_event_listener().unwrap();
+        let meeting = engine.create(actor("director"), request()).unwrap();
+        let blocked = wait_terminal(&engine, &meeting.id).await;
+        let decision_id = blocked.linked_decision.clone().unwrap();
+        assert_eq!(blocked.execution_gates.len(), 1);
+        engine
+            .governance
+            .resolve_decision(&decision_id, true, Some("bounded meeting only".into()))
+            .unwrap();
+        let completed = wait_until_completed(&engine, &meeting.id).await;
+        assert_eq!(completed.status, MeetingStatus::Completed);
+        let turns = engine.turns(&meeting.id).unwrap();
+        assert_eq!(
+            turns
+                .iter()
+                .filter(|turn| turn.kind == MeetingTurnKind::Position)
+                .count(),
+            3
+        );
+        assert!(completed
+            .execution_gates
+            .iter()
+            .any(|gate| gate.status == ExecutionGateStatus::Approved));
+    }
+
+    #[tokio::test]
+    async fn rejected_payg_reroutes_only_after_payg_is_disabled() {
+        let engine = setup(Arc::new(MockProvider::default()));
+        enable_payg_meetings(&engine);
+        engine.start_event_listener().unwrap();
+        let meeting = engine.create(actor("director"), request()).unwrap();
+        let blocked = wait_terminal(&engine, &meeting.id).await;
+        let decision_id = blocked.linked_decision.clone().unwrap();
+        engine
+            .store
+            .upsert_intelligence_resource(&resource(BillingMode::SubscriptionQuota, Some(3)))
+            .unwrap();
+        engine
+            .governance
+            .resolve_decision(&decision_id, false, Some("use subscription".into()))
+            .unwrap();
+        let completed = wait_until_completed(&engine, &meeting.id).await;
+        assert_eq!(completed.status, MeetingStatus::Completed);
+        assert!(completed.payg_rejected);
+        assert!(completed
+            .execution_gates
+            .iter()
+            .any(|gate| gate.status == ExecutionGateStatus::Rejected));
+    }
+
+    #[tokio::test]
+    async fn approved_before_restart_is_reconciled_and_resumed_once() {
+        let engine = setup(Arc::new(MockProvider::default()));
+        enable_payg_meetings(&engine);
+        let meeting = engine.create(actor("director"), request()).unwrap();
+        let blocked = wait_terminal(&engine, &meeting.id).await;
+        let decision_id = blocked.linked_decision.unwrap();
+        engine
+            .governance
+            .resolve_decision(&decision_id, true, None)
+            .unwrap();
+        engine.start_event_listener().unwrap();
+        engine.reconcile_startup().unwrap();
+        let completed = wait_until_completed(&engine, &meeting.id).await;
+        assert_eq!(completed.status, MeetingStatus::Completed);
+        assert_eq!(
+            engine
+                .turns(&meeting.id)
+                .unwrap()
+                .iter()
+                .filter(|turn| turn.kind == MeetingTurnKind::Position)
+                .count(),
+            3
+        );
+    }
+
+    #[tokio::test]
+    async fn changed_meeting_configuration_supersedes_old_approval() {
+        let engine = setup(Arc::new(MockProvider::default()));
+        enable_payg_meetings(&engine);
+        engine.start_event_listener().unwrap();
+        let meeting = engine.create(actor("director"), request()).unwrap();
+        let mut blocked = wait_terminal(&engine, &meeting.id).await;
+        let decision_id = blocked.linked_decision.clone().unwrap();
+        blocked.objective = "Changed while approval was pending".into();
+        engine.store.upsert_meeting(&blocked).unwrap();
+        engine
+            .governance
+            .resolve_decision(&decision_id, true, None)
+            .unwrap();
+        for _ in 0..200 {
+            let current = engine.get(&meeting.id).unwrap().unwrap();
+            if current.execution_gates.len() >= 2 && current.status == MeetingStatus::Blocked {
+                assert_eq!(
+                    current.execution_gates[0].status,
+                    ExecutionGateStatus::Superseded
+                );
+                assert_eq!(
+                    current.execution_gates[1].status,
+                    ExecutionGateStatus::Waiting
+                );
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("stale approval was not re-evaluated")
+    }
+
+    #[tokio::test]
+    async fn policy_change_supersedes_open_payg_decision_and_reroutes() {
+        let engine = setup(Arc::new(MockProvider::default()));
+        enable_payg_meetings(&engine);
+        engine.start_event_listener().unwrap();
+        let meeting = engine.create(actor("director"), request()).unwrap();
+        let blocked = wait_terminal(&engine, &meeting.id).await;
+        let decision_id = blocked.linked_decision.clone().unwrap();
+
+        let snapshot = engine.governance.snapshot().unwrap();
+        let mut policy = snapshot.policy;
+        policy.allow_payg = false;
+        policy.meetings.allow_payg_for_meetings = false;
+        engine
+            .governance
+            .mutate(MutationRequest {
+                actor: actor("god"),
+                expected_revision: snapshot.revision,
+                task_id: None,
+                reason: Some("disable PAYG while a meeting gate is open".into()),
+                mutation: OrganizationMutation::UpdateProjectPolicy { policy },
+            })
+            .unwrap();
+
+        for _ in 0..200 {
+            let current = engine.get(&meeting.id).unwrap().unwrap();
+            let decision = engine
+                .governance
+                .snapshot()
+                .unwrap()
+                .decisions
+                .into_iter()
+                .find(|decision| decision.id == decision_id)
+                .unwrap();
+            if current.execution_gates[0].status == ExecutionGateStatus::Superseded
+                && decision.status == DecisionStatus::Superseded
+                && current.status == MeetingStatus::Blocked
+            {
+                assert!(!current.payg_rejected);
+                assert_eq!(current.execution_gates.len(), 1);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("policy change did not supersede and safely re-evaluate the PAYG gate")
     }
 
     #[tokio::test]
@@ -2015,6 +2781,11 @@ mod tests {
             result: None,
             usage: MeetingUsage::default(),
             recovery_note: None,
+            explicit_files: Vec::new(),
+            context_budget: ContextBudget::default(),
+            context_packages: Vec::new(),
+            execution_gates: Vec::new(),
+            payg_rejected: false,
         };
         engine.store.upsert_meeting(&meeting).unwrap();
         let turn = MeetingTurn {
@@ -2035,6 +2806,9 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
             started_at: Some(Utc::now().to_rfc3339()),
             completed_at: None,
+            context_id: None,
+            context_fingerprint: None,
+            estimated_context_tokens: None,
         };
         engine.store.upsert_meeting_turn(&turn).unwrap();
         engine.reconcile_startup().unwrap();

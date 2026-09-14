@@ -38,6 +38,8 @@ The core idea is that the **Director AI operates the organization through Batai 
 - Official Rust SDK-based MCP Director bridge and secure daemon-hosted loopback HTTP API
 - Versioned, project-bound local RPC, OS-vault credentials, transport-assigned actors, bounded live-event fan-out and persistent mutation deduplication
 - Bounded multi-agent meetings with independent first positions, conditional disagreement response, deterministic closure, economic/provider gates and restart-safe turn identity
+- Shared minimum-sufficient Context Builder with hard input budgets, worktree-aware sources, provenance, sensitive-file exclusion and participant-specific packages
+- Event-driven gated continuation with exact PAYG binding, rejection-safe rerouting, stale-approval protection and at-most-once restart recovery
 - Live node-edge Organization Map with Hierarchy, Workflow and Combined modes, semantic edges, search, filters, pan/zoom and Agent Inspector
 - Organization Edit mode, Agent Factory form, GOD decisions, exact live provider approvals, recovery queue and project policy settings
 - Resource Dashboard with provider health, usage source, quota, token and provider-reported cost summaries

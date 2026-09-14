@@ -156,7 +156,13 @@ uppercase_enum!(EventType {
     MeetingParticipantCompleted,
     MeetingBlocked,
     MeetingCompleted,
-    MeetingCancelled
+    MeetingCancelled,
+    ContextBuilt,
+    ContextRebuilt,
+    ContextWarning,
+    ExecutionGateOpened,
+    ExecutionGateResolved,
+    MeetingResumed
 });
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -85,6 +85,8 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 ```
 
+Economic PAYG permission and live provider-operation approval are separate execution gates. A PAYG decision authorizes only its bound operation/resource/model/budget scope. Context packages are rebuilt and fingerprinted immediately before provider execution; estimated input size is recorded separately from actual provider-reported input tokens.
+
 Authenticated tests are opt-in and do not run in ordinary CI:
 
 ```text

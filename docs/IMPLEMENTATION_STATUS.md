@@ -26,8 +26,10 @@
 - Per-project Rust daemon with one `BataiApplication`, one SQLite writer and concurrent Desktop/MCP/HTTP clients
 - Versioned, project-bound authenticated local RPC with OS-vault credentials, actor isolation, bounded event fan-out and restart-persistent mutation deduplication
 - Daemon-owned bounded Meeting Engine with persisted turns, independent parallel positions, conditional disagreement round, economic routing, hard token/participant ceilings, action-to-task links and conservative crash recovery
+- Shared deterministic Context Builder with worktree-aware selection, hard input budgets, provenance, sensitive-file exclusion, participant-specific packages and freshness fingerprints
+- Event-driven execution gates with exact PAYG decision binding, stale-approval protection, rejection-safe rerouting and restart-safe at-most-once meeting continuation
 
-Automated suites at the time of this snapshot: **193 passing Rust tests** and **43 passing Node compatibility/UI tests**.
+Automated suites at the time of this snapshot: **204 passing Rust tests** and **44 passing Node compatibility/UI tests**.
 
 ## Implemented and smoke-tested at protocol/process level
 
@@ -107,7 +109,7 @@ The external production control plane is Rust-native and daemon-owned. Closing D
 ## Next engineering milestones
 
 1. Run an opt-in longitudinal calibration pilot with reviewed production tasks, then tune thresholds through the suggestion/replay workflow.
-2. Add explicit meeting scheduling/queueing and post-approval PAYG resume without weakening current no-replay recovery rules.
+2. Extend the shared Context Builder into task execution/review and add explicit meeting scheduling/queueing.
 3. Add provider-specific observable activity adapters (reading/testing/tool use) without capturing private reasoning.
 4. Install Claude Code and Ollama on a development host and run their authenticated/local opt-in end-to-end tests.
 5. Add controlled daemon restart/upgrade handoff and an optional idle-exit policy that checks active runtime work before shutdown.

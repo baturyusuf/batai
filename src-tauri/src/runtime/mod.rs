@@ -1,11 +1,13 @@
 pub mod agents;
 pub mod benchmark;
+pub mod context;
 pub mod credentials;
 pub mod delivery;
 pub mod economic;
 pub mod errors;
 pub mod events;
 pub mod execution_provider;
+pub mod gates;
 pub mod governance;
 pub mod hardware;
 pub mod learning;
@@ -37,6 +39,7 @@ use crate::providers::{
     minimax_token, ollama::OllamaProvider, zai_coding,
 };
 use agents::AgentRegistry;
+use context::ContextBuilder;
 use errors::Result;
 use events::EventEngine;
 use execution_provider::{ExecutionProvider, MockProvider};
@@ -59,6 +62,7 @@ pub struct BataiRuntime {
     pub sessions: SessionManager,
     pub governance: GovernanceService,
     pub delivery: delivery::DeliveryService,
+    pub context: ContextBuilder,
     pub meetings: Arc<MeetingEngine>,
     watcher: Mutex<Option<TaskWatcher>>,
     organization_watcher: Mutex<Option<OrganizationWatcher>>,
@@ -191,6 +195,7 @@ impl BataiRuntime {
             task_engine = task_engine.with_worktrees(manager);
         }
         let tasks = Arc::new(task_engine);
+        let context = ContextBuilder::new(root.clone(), store.clone());
         let meetings = Arc::new(MeetingEngine::new(
             root.clone(),
             store.clone(),
@@ -199,6 +204,7 @@ impl BataiRuntime {
             sessions.clone(),
             Arc::clone(&tasks),
             governance.clone(),
+            context.clone(),
         ));
         Ok(Arc::new(Self {
             root,
@@ -209,6 +215,7 @@ impl BataiRuntime {
             sessions,
             governance,
             delivery,
+            context,
             meetings,
             watcher: Mutex::new(None),
             organization_watcher: Mutex::new(None),
@@ -221,6 +228,7 @@ impl BataiRuntime {
         self.delivery.reconcile_startup()?;
         self.store.reconcile_interrupted()?;
         self.load_agents()?;
+        self.meetings.start_event_listener()?;
         self.meetings.reconcile_startup()?;
         let watcher = TaskWatcher::start(
             &self.root.join(".batai/tasks"),
