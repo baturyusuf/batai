@@ -29,7 +29,7 @@
 - Shared deterministic Context Builder with worktree-aware selection, hard input budgets, provenance, sensitive-file exclusion, participant-specific packages and freshness fingerprints
 - Event-driven execution gates with exact PAYG decision binding, stale-approval protection, rejection-safe rerouting and restart-safe at-most-once meeting continuation
 
-Automated suites at the time of this snapshot: **204 passing Rust tests** and **44 passing Node compatibility/UI tests**.
+Automated suites at the time of this snapshot: **205 passing Rust tests** and **44 passing Node compatibility/UI tests**.
 
 ## Implemented and smoke-tested at protocol/process level
 

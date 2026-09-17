@@ -120,12 +120,19 @@ uppercase_enum!(EventType {
     TaskCancellationRequested,
     ProviderCrashDetected,
     AgentCreated,
+    AgentReady,
+    AgentCompleted,
     AgentUpdated,
     AgentTerminated,
+    DirectiveUpdated,
     OrganizationChanged,
     RelationshipAdded,
     RelationshipRemoved,
     GodDecisionRequired,
+    CustomerDecisionRequired,
+    GodMessageReceived,
+    GodDecisionResolved,
+    DecisionCreated,
     DecisionResolved,
     AuditRecorded,
     ProviderApprovalResolved,
@@ -137,6 +144,10 @@ uppercase_enum!(EventType {
     OperationRolledBack,
     OperationRecoveryRequired,
     GithubIssueLinked,
+    IssueCreated,
+    IssueAssigned,
+    PrCreated,
+    PrApproved,
     DeliveryCommitted,
     BranchPushed,
     PullRequestCreated,
@@ -391,4 +402,32 @@ pub enum IngestDisposition {
     Created,
     Updated,
     Duplicate,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventType;
+
+    #[test]
+    fn legacy_node_events_remain_readable() {
+        for (encoded, expected) in [
+            ("AGENT_READY", EventType::AgentReady),
+            ("AGENT_COMPLETED", EventType::AgentCompleted),
+            ("DIRECTIVE_UPDATED", EventType::DirectiveUpdated),
+            ("ISSUE_CREATED", EventType::IssueCreated),
+            ("ISSUE_ASSIGNED", EventType::IssueAssigned),
+            ("PR_CREATED", EventType::PrCreated),
+            ("PR_APPROVED", EventType::PrApproved),
+            (
+                "CUSTOMER_DECISION_REQUIRED",
+                EventType::CustomerDecisionRequired,
+            ),
+            ("GOD_MESSAGE_RECEIVED", EventType::GodMessageReceived),
+            ("GOD_DECISION_RESOLVED", EventType::GodDecisionResolved),
+            ("DECISION_CREATED", EventType::DecisionCreated),
+        ] {
+            let event: EventType = serde_json::from_value(encoded.into()).unwrap();
+            assert_eq!(event, expected);
+        }
+    }
 }
