@@ -26,8 +26,8 @@
 - Per-project Rust daemon with one `BataiApplication`, one SQLite writer and concurrent Desktop/MCP/HTTP clients
 - Versioned, project-bound authenticated local RPC with OS-vault credentials, actor isolation, bounded event fan-out and restart-persistent mutation deduplication
 - Daemon-owned bounded Meeting Engine with persisted turns, independent parallel positions, conditional disagreement round, economic routing, hard token/participant ceilings, action-to-task links and conservative crash recovery
-- Shared deterministic Context Builder with worktree-aware selection, hard input budgets, provenance, sensitive-file exclusion, participant-specific packages and freshness fingerprints
-- Event-driven execution gates with exact PAYG decision binding, stale-approval protection, rejection-safe rerouting and restart-safe at-most-once meeting continuation
+- Shared deterministic Context Builder with one bounded reader for every file-backed source, worktree-aware selection, hard input budgets, provenance, sensitive-file exclusion, participant-specific packages and freshness fingerprints for mutable records
+- Event-driven execution gates with exact PAYG decision binding, policy/resource/context/routing revalidation at consumption, final pre-provider freshness barrier, stale-approval protection, rejection-safe rerouting and restart-safe at-most-once meeting continuation
 
 Automated suites at the time of this snapshot: **205 passing Rust tests** and **44 passing Node compatibility/UI tests**.
 

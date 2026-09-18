@@ -788,6 +788,10 @@ impl GovernanceService {
     }
 
     pub(crate) fn supersede_open_decision(&self, decision_id: &str, note: String) -> Result<bool> {
+        self.supersede_decision(decision_id, note)
+    }
+
+    pub(crate) fn supersede_decision(&self, decision_id: &str, note: String) -> Result<bool> {
         let _guard = self
             .mutation_lock
             .lock()
@@ -799,7 +803,10 @@ impl GovernanceService {
         else {
             return Ok(false);
         };
-        if decision.status != DecisionStatus::Open {
+        if !matches!(
+            decision.status,
+            DecisionStatus::Open | DecisionStatus::Approved
+        ) {
             return Ok(false);
         }
         decision.status = DecisionStatus::Superseded;

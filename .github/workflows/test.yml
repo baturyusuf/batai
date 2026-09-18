@@ -31,6 +31,7 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked --all-targets
       - run: cargo build --locked
+      - run: cargo build --release --locked
       - name: Rust-only control-plane binary smoke
         run: cargo run --locked --bin batai-control -- --help
       - name: Rust daemon, HTTP and MCP concurrent smoke

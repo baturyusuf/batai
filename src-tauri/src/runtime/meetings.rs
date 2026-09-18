@@ -761,6 +761,13 @@ impl MeetingEngine {
             &meeting,
             &meeting.execution_gates[gate_index],
             &decision,
+            meeting.execution_gates[gate_index]
+                .context_fingerprint
+                .as_deref()
+                .unwrap_or_default(),
+            meeting.execution_gates[gate_index]
+                .routing_decision_id
+                .as_deref(),
         )?;
         let now = Utc::now().to_rfc3339();
         let gate = &mut meeting.execution_gates[gate_index];
@@ -1015,7 +1022,17 @@ impl MeetingEngine {
         self.record_context_package(meeting, &mut context_package)?;
         let (routed, route_id, resource_id) =
             self.route_agent(meeting, &agent, &context_package.fingerprint)?;
+        let (routed, route_id, resource_id, context_package) = self
+            .refresh_context_before_provider(
+                meeting,
+                routed,
+                route_id,
+                resource_id,
+                context_package,
+                2,
+            )?;
         agent = routed;
+        let mut context_package = context_package;
         let provider_lane = self.provider_lane(&agent, resource_id.as_deref())?;
         let _provider_permit = if let Some(lane) = provider_lane {
             Some(tokio::select! {
@@ -1032,6 +1049,30 @@ impl MeetingEngine {
         } else {
             None
         };
+        let initial_resource_id = resource_id.clone();
+        let (rerouted, refreshed_route_id, refreshed_resource_id, refreshed_package) = self
+            .refresh_context_before_provider(
+                meeting,
+                agent.clone(),
+                route_id,
+                resource_id,
+                context_package,
+                1,
+            )?;
+        if rerouted.provider != agent.provider
+            || rerouted.model != agent.model
+            || refreshed_resource_id != initial_resource_id
+        {
+            return Err(RuntimeError::ResourceUnavailable {
+                agent_id: agent.id,
+                status: "CONTEXT_CHANGED_REQUIRES_REROUTE".into(),
+                reset_at: None,
+            });
+        }
+        agent = rerouted;
+        let route_id = refreshed_route_id;
+        let resource_id = refreshed_resource_id;
+        context_package = refreshed_package;
         let now = Utc::now().to_rfc3339();
         let turn_id = format!(
             "MTURN-{}-{}-{}-{}",
@@ -1072,6 +1113,42 @@ impl MeetingEngine {
             meeting.linked_task.clone(),
             json!({"meetingId":meeting.id,"round":round,"kind":kind,"activity":"MEETING","resourceId":resource_id,"routingDecisionId":route_id}),
         )?;
+        if !self.context_is_fresh_for_meeting(meeting, &agent, &context_package)? {
+            turn.status = MeetingTurnStatus::Failed;
+            turn.failure = Some("CONTEXT_CHANGED_BEFORE_PROVIDER_TURN".into());
+            turn.completed_at = Some(Utc::now().to_rfc3339());
+            self.store.upsert_meeting_turn(&turn)?;
+            return Err(RuntimeError::Governance(
+                "meeting context changed immediately before provider execution; retry is required"
+                    .into(),
+            ));
+        }
+        let (final_agent, _final_route_id, final_resource_id) =
+            match self.route_agent(meeting, &agent, &context_package.fingerprint) {
+                Ok(value) => value,
+                Err(error) => {
+                    turn.status = MeetingTurnStatus::Failed;
+                    turn.failure = Some("PAYG_GATE_REVALIDATION_FAILED".into());
+                    turn.completed_at = Some(Utc::now().to_rfc3339());
+                    self.store.upsert_meeting_turn(&turn)?;
+                    return Err(error);
+                }
+            };
+        if final_agent.provider != agent.provider
+            || final_agent.model != agent.model
+            || final_resource_id != resource_id
+        {
+            turn.status = MeetingTurnStatus::Failed;
+            turn.failure = Some("RESOURCE_CHANGED_BEFORE_PROVIDER_TURN".into());
+            turn.completed_at = Some(Utc::now().to_rfc3339());
+            self.store.upsert_meeting_turn(&turn)?;
+            return Err(RuntimeError::ResourceUnavailable {
+                agent_id: agent.id.clone(),
+                status: "RESOURCE_CHANGED_REQUIRES_REROUTE".into(),
+                reset_at: None,
+            });
+        }
+        agent = final_agent;
         let task = meeting_task(meeting, &agent, round, kind, &context_package, context);
         let provider = self.sessions.provider_for(&agent)?;
         let outcome = tokio::select! {
@@ -1220,14 +1297,28 @@ impl MeetingEngine {
             .as_deref()
             .and_then(|id| resources.iter().find(|resource| resource.id == id))
         {
-            if resource.billing_mode == BillingMode::Payg
-                && !self.has_approved_payg_gate(
+            if resource.billing_mode == BillingMode::Payg && {
+                let bound_route = meeting
+                    .execution_gates
+                    .iter()
+                    .find(|gate| {
+                        gate.status == ExecutionGateStatus::Approved
+                            && gate.resource_id.as_deref() == Some(resource.id.as_str())
+                            && gate.provider.as_deref() == Some(routed.provider.as_str())
+                            && gate.model.as_deref() == Some(routed.model.as_str())
+                            && gate.context_fingerprint.as_deref() == Some(context_fingerprint)
+                    })
+                    .and_then(|gate| gate.routing_decision_id.as_deref());
+                let current_route = bound_route.or(Some(decision.id.as_str()));
+                !self.has_approved_payg_gate(
                     meeting,
                     &resource.id,
                     &routed.provider,
                     &routed.model,
-                )
-            {
+                    context_fingerprint,
+                    current_route,
+                )?
+            } {
                 self.request_payg_decision(
                     meeting,
                     &resource.id,
@@ -1277,7 +1368,9 @@ impl MeetingEngine {
                     &resource.id,
                     &agent.provider,
                     &agent.model,
-                ) {
+                    context_fingerprint,
+                    None,
+                )? {
                     self.request_payg_decision(
                         meeting,
                         &resource.id,
@@ -1335,11 +1428,38 @@ impl MeetingEngine {
         resource_id: &str,
         provider: &str,
         model: &str,
-    ) -> bool {
-        meeting
-            .execution_gates
-            .iter()
-            .any(|gate| gate.matches_payg(resource_id, provider, model))
+        context_fingerprint: &str,
+        routing_decision_id: Option<&str>,
+    ) -> Result<bool> {
+        let snapshot = self.governance.snapshot()?;
+        for gate in meeting.execution_gates.iter().filter(|gate| {
+            gate.gate_type == ExecutionGateType::GodDecision
+                && gate.status == ExecutionGateStatus::Approved
+                && gate.resource_id.as_deref() == Some(resource_id)
+                && gate.provider.as_deref() == Some(provider)
+                && gate.model.as_deref() == Some(model)
+        }) {
+            let Some(decision_id) = gate.decision_id.as_deref() else {
+                continue;
+            };
+            let Some(decision) = snapshot
+                .decisions
+                .iter()
+                .find(|item| item.id == decision_id)
+            else {
+                continue;
+            };
+            if self.gate_binding_is_current(
+                meeting,
+                gate,
+                decision,
+                context_fingerprint,
+                routing_decision_id,
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     fn gate_binding_is_current(
@@ -1347,6 +1467,8 @@ impl MeetingEngine {
         meeting: &Meeting,
         gate: &ExecutionGate,
         decision: &super::governance::GodDecision,
+        context_fingerprint: &str,
+        routing_decision_id: Option<&str>,
     ) -> Result<bool> {
         let expected_revision = gate.expected_policy_revision;
         let required_current_revision = if decision.status == DecisionStatus::Approved {
@@ -1357,6 +1479,10 @@ impl MeetingEngine {
         if decision.request.expected_revision != expected_revision
             || self.governance.snapshot()?.revision != required_current_revision
             || decision.request.mutation.target() != Some(gate.operation_id.as_str())
+            || gate.gate_type != ExecutionGateType::GodDecision
+            || gate.safe_continuation_phase != "BEFORE_PROVIDER_TURN"
+            || gate.context_fingerprint.as_deref() != Some(context_fingerprint)
+            || gate.routing_decision_id.as_deref() != routing_decision_id
         {
             return Ok(false);
         }
@@ -1374,8 +1500,20 @@ impl MeetingEngine {
                         .any(|model| model == gate.model.as_deref().unwrap_or_default())
             })
         });
+        let policy = self.governance.snapshot()?.policy;
+        let resource_eligible_for_approval = decision.status != DecisionStatus::Approved
+            || resources.iter().any(|resource| {
+                gate.resource_id.as_deref() == Some(resource.id.as_str())
+                    && resource.billing_mode == BillingMode::Payg
+                    && matches!(resource.status.as_str(), "AVAILABLE" | "LOW" | "DEGRADED")
+            });
         let configuration_fingerprint = meeting_configuration_fingerprint(meeting);
-        Ok(resource_current
+        Ok((decision.status != DecisionStatus::Approved
+            || (policy.allow_payg && policy.meetings.allow_payg_for_meetings))
+            && resource_current
+            && resource_eligible_for_approval
+            && detail.get("expectedPolicyRevision").and_then(Value::as_u64)
+                == Some(expected_revision)
             && detail.get("meetingId").and_then(Value::as_str) == Some(meeting.id.as_str())
             && detail.get("resourceId").and_then(Value::as_str) == gate.resource_id.as_deref()
             && detail.get("provider").and_then(Value::as_str) == gate.provider.as_deref()
@@ -1384,7 +1522,12 @@ impl MeetingEngine {
             && detail
                 .get("meetingConfigurationFingerprint")
                 .and_then(Value::as_str)
-                == Some(configuration_fingerprint.as_str()))
+                == Some(configuration_fingerprint.as_str())
+            && detail.get("contextFingerprint").and_then(Value::as_str)
+                == Some(context_fingerprint)
+            && detail.get("routingDecisionId").and_then(Value::as_str) == routing_decision_id
+            && detail.get("safeContinuationPhase").and_then(Value::as_str)
+                == Some(gate.safe_continuation_phase.as_str()))
     }
 
     fn build_participant_context(
@@ -1392,12 +1535,17 @@ impl MeetingEngine {
         meeting: &Meeting,
         agent: &Agent,
     ) -> Result<ContextPackage> {
+        self.context
+            .build(self.participant_context_request(meeting, agent))
+    }
+
+    fn participant_context_request(&self, meeting: &Meeting, agent: &Agent) -> ContextBuildRequest {
         let worktree = agent
             .worktree
             .as_deref()
             .map(PathBuf::from)
             .filter(|path| path.is_dir());
-        self.context.build(ContextBuildRequest {
+        ContextBuildRequest {
             operation: ContextOperationType::Meeting,
             objective: meeting.objective.clone(),
             actor: agent.clone(),
@@ -1408,7 +1556,63 @@ impl MeetingEngine {
             worktree,
             explicit_files: meeting.explicit_files.clone(),
             budget: meeting.context_budget.clone(),
-        })
+        }
+    }
+
+    fn context_is_fresh_for_meeting(
+        &self,
+        meeting: &Meeting,
+        agent: &Agent,
+        package: &ContextPackage,
+    ) -> Result<bool> {
+        if package.objective != meeting.objective {
+            return Ok(false);
+        }
+        let request = self.participant_context_request(meeting, agent);
+        let project_root = self.root.canonicalize()?;
+        let root = self.context.resolved_source_root(&request, &project_root)?;
+        self.context.is_fresh(&package.record(), &root)
+    }
+
+    fn refresh_context_before_provider(
+        &self,
+        meeting: &Meeting,
+        mut agent: Agent,
+        mut route_id: Option<String>,
+        mut resource_id: Option<String>,
+        mut package: ContextPackage,
+        max_rebuilds: usize,
+    ) -> Result<(Agent, Option<String>, Option<String>, ContextPackage)> {
+        for _ in 0..=max_rebuilds {
+            if self.context_is_fresh_for_meeting(meeting, &agent, &package)? {
+                return Ok((agent, route_id, resource_id, package));
+            }
+            let rebuilt = self.build_participant_context(meeting, &agent)?;
+            if rebuilt.status == ContextBuildStatus::Blocked {
+                return Err(RuntimeError::Governance(format!(
+                    "required meeting context became blocked: {}",
+                    rebuilt.warnings.join("; ")
+                )));
+            }
+            let mut rebuilt = rebuilt;
+            self.record_context_package(meeting, &mut rebuilt)?;
+            let (rerouted, reroute_id, reroute_resource) =
+                self.route_agent(meeting, &agent, &rebuilt.fingerprint)?;
+            if rerouted.provider != agent.provider || rerouted.model != agent.model {
+                return Err(RuntimeError::ResourceUnavailable {
+                    agent_id: agent.id,
+                    status: "CONTEXT_CHANGED_REQUIRES_REROUTE".into(),
+                    reset_at: None,
+                });
+            }
+            agent = rerouted;
+            route_id = reroute_id;
+            resource_id = reroute_resource;
+            package = rebuilt;
+        }
+        Err(RuntimeError::Governance(
+            "meeting context changed repeatedly before provider execution".into(),
+        ))
     }
 
     fn record_context_package(
@@ -1484,6 +1688,37 @@ impl MeetingEngine {
         }
         drop(claims);
         let mut persisted = self.required_meeting(&meeting.id)?;
+        let stale_decisions = persisted
+            .execution_gates
+            .iter_mut()
+            .filter(|gate| {
+                matches!(
+                    gate.status,
+                    ExecutionGateStatus::Waiting | ExecutionGateStatus::Approved
+                ) && gate.resource_id.as_deref() == Some(resource_id)
+                    && gate.provider.as_deref() == Some(provider)
+                    && gate.model.as_deref() == Some(model)
+                    && (gate.context_fingerprint.as_deref() != Some(context_fingerprint)
+                        || gate.routing_decision_id.as_deref() != routing_decision_id)
+            })
+            .filter_map(|gate| {
+                gate.status = ExecutionGateStatus::Superseded;
+                gate.resolved_at = Some(Utc::now().to_rfc3339());
+                gate.resolution_reason =
+                    Some("context or routing binding changed before PAYG consumption".into());
+                gate.decision_id.clone()
+            })
+            .collect::<Vec<_>>();
+        if !stale_decisions.is_empty() {
+            self.store.upsert_meeting(&persisted)?;
+            for decision_id in stale_decisions {
+                self.governance.supersede_decision(
+                    &decision_id,
+                    "PAYG approval binding changed before consumption".into(),
+                )?;
+            }
+            persisted = self.required_meeting(&meeting.id)?;
+        }
         if persisted.execution_gates.iter().any(|gate| {
             matches!(
                 gate.status,
@@ -1491,6 +1726,8 @@ impl MeetingEngine {
             ) && gate.resource_id.as_deref() == Some(resource_id)
                 && gate.provider.as_deref() == Some(provider)
                 && gate.model.as_deref() == Some(model)
+                && gate.context_fingerprint.as_deref() == Some(context_fingerprint)
+                && gate.routing_decision_id.as_deref() == routing_decision_id
         }) {
             return Ok(());
         }
@@ -1516,10 +1753,18 @@ impl MeetingEngine {
                             detail.get("resourceId").and_then(Value::as_str) == Some(resource_id)
                                 && detail.get("provider").and_then(Value::as_str) == Some(provider)
                                 && detail.get("model").and_then(Value::as_str) == Some(model)
+                                && detail.get("expectedPolicyRevision").and_then(Value::as_u64)
+                                    == Some(revision)
+                                && detail.get("maximumMeetingTokens").and_then(Value::as_u64)
+                                    == Some(meeting.total_meeting_token_budget)
                                 && detail
                                     .get("meetingConfigurationFingerprint")
                                     .and_then(Value::as_str)
                                     == Some(configuration_fingerprint.as_str())
+                                && detail.get("contextFingerprint").and_then(Value::as_str)
+                                    == Some(context_fingerprint)
+                                && detail.get("routingDecisionId").and_then(Value::as_str)
+                                    == routing_decision_id
                         })
             });
         if let Some(decision) = existing {
@@ -1568,6 +1813,9 @@ impl MeetingEngine {
                     "expectedPolicyRevision": revision,
                     "maximumMeetingTokens": meeting.total_meeting_token_budget,
                     "meetingConfigurationFingerprint": configuration_fingerprint,
+                    "contextFingerprint": context_fingerprint,
+                    "routingDecisionId": routing_decision_id,
+                    "safeContinuationPhase": "BEFORE_PROVIDER_TURN",
                     "scope": "MEETING_ONLY"
                 }),
             },

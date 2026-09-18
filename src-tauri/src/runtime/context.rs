@@ -23,6 +23,7 @@ use super::{
     organization::AgentFunction,
     store::RuntimeStore,
     types::{Agent, Task},
+    worktrees::WorktreeManager,
 };
 
 const DEFAULT_MAX_TOKENS: u64 = 6_000;
@@ -30,6 +31,10 @@ const DEFAULT_MAX_FILES: usize = 12;
 const DEFAULT_MAX_BYTES_PER_FILE: u64 = 64 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES: u64 = 192 * 1024;
 const DEFAULT_MAX_HISTORY: usize = 8;
+
+fn default_max_bytes_per_file() -> u64 {
+    DEFAULT_MAX_BYTES_PER_FILE
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -126,6 +131,7 @@ pub struct ContextPackage {
     pub warnings: Vec<String>,
     pub estimated_tokens: u64,
     pub total_bytes: u64,
+    pub max_bytes_per_file: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -135,6 +141,8 @@ pub struct ContextPackageRecord {
     pub fingerprint: String,
     pub created_at: String,
     pub operation: ContextOperationType,
+    #[serde(default)]
+    pub objective: String,
     pub actor_id: String,
     pub participant_role: Option<AgentFunction>,
     pub base_sha: Option<String>,
@@ -144,6 +152,8 @@ pub struct ContextPackageRecord {
     pub warnings: Vec<String>,
     pub estimated_tokens: u64,
     pub total_bytes: u64,
+    #[serde(default = "default_max_bytes_per_file")]
+    pub max_bytes_per_file: u64,
 }
 
 impl ContextPackage {
@@ -153,6 +163,7 @@ impl ContextPackage {
             fingerprint: self.fingerprint.clone(),
             created_at: self.created_at.clone(),
             operation: self.operation,
+            objective: self.objective.clone(),
             actor_id: self.actor_id.clone(),
             participant_role: self.participant_role,
             base_sha: self.base_sha.clone(),
@@ -162,6 +173,7 @@ impl ContextPackage {
             warnings: self.warnings.clone(),
             estimated_tokens: self.estimated_tokens,
             total_bytes: self.total_bytes,
+            max_bytes_per_file: self.max_bytes_per_file,
         }
     }
 
@@ -224,12 +236,8 @@ impl ContextBuilder {
 
     pub fn build(&self, request: ContextBuildRequest) -> Result<ContextPackage> {
         validate_budget(&request.budget)?;
-        let source_root = request
-            .worktree
-            .as_deref()
-            .unwrap_or(request.repository.as_path());
-        let source_root = canonical_directory(source_root)?;
         let project_root = canonical_directory(&self.project_root)?;
+        let source_root = self.resolved_source_root(&request, &project_root)?;
         let base_sha = git_head(&source_root);
         let mut candidates = Vec::new();
         let mut excluded = Vec::new();
@@ -249,7 +257,13 @@ impl ContextBuilder {
             historical: false,
         });
 
-        self.add_directives(&request, &project_root, &mut candidates, &mut warnings)?;
+        self.add_directives(
+            &request,
+            &project_root,
+            &mut candidates,
+            &mut excluded,
+            &mut warnings,
+        )?;
         let task = self.add_task(&request, &mut candidates)?;
         self.add_decisions(&request, &mut candidates)?;
         self.add_adrs(
@@ -260,7 +274,13 @@ impl ContextBuilder {
             &mut excluded,
             &mut warnings,
         )?;
-        self.add_handoff(&request, &project_root, &mut candidates, &mut warnings)?;
+        self.add_handoff(
+            &request,
+            &project_root,
+            &mut candidates,
+            &mut excluded,
+            &mut warnings,
+        )?;
         self.add_reviews(&request, &mut candidates)?;
         self.add_meeting_history(&request, &mut candidates)?;
 
@@ -390,6 +410,7 @@ impl ContextBuilder {
             warnings,
             estimated_tokens,
             total_bytes,
+            max_bytes_per_file: request.budget.max_bytes_per_file,
         })
     }
 
@@ -399,21 +420,123 @@ impl ContextBuilder {
             return Ok(false);
         }
         for source in &record.sources {
-            if !matches!(
-                source.source_type,
-                ContextSourceType::File | ContextSourceType::Interface
-            ) {
-                continue;
-            }
-            let Some((content, _, _)) = read_safe_file(&root, &source.source_id, u64::MAX, true)?
-            else {
+            let Some(fingerprint) = self.current_source_fingerprint(source, &root)? else {
                 return Ok(false);
             };
-            if hash_bytes(content.as_bytes()) != source.fingerprint {
+            if fingerprint != source.fingerprint {
                 return Ok(false);
             }
         }
         Ok(true)
+    }
+
+    pub fn resolved_source_root(
+        &self,
+        request: &ContextBuildRequest,
+        project_root: &Path,
+    ) -> Result<PathBuf> {
+        let Some(worktree) = request.worktree.as_deref() else {
+            return canonical_directory(project_root);
+        };
+        let source_root = canonical_directory(worktree)?;
+        if source_root == project_root {
+            return Ok(source_root);
+        }
+        if let Some(task_id) = request.linked_task.as_deref() {
+            let task = self
+                .store
+                .get_task(task_id)?
+                .ok_or_else(|| RuntimeError::TaskNotFound(task_id.into()))?;
+            if !task
+                .assigned_to
+                .iter()
+                .any(|agent| agent == &request.actor.id)
+            {
+                return Err(RuntimeError::Governance(format!(
+                    "context worktree task {task_id} is not assigned to agent {}",
+                    request.actor.id
+                )));
+            }
+        }
+        WorktreeManager::discover(project_root)?.validate_context_worktree(
+            &source_root,
+            &request.actor.id,
+            request.linked_task.as_deref(),
+        )?;
+        Ok(source_root)
+    }
+
+    fn current_source_fingerprint(
+        &self,
+        source: &ContextSourceRecord,
+        root: &Path,
+    ) -> Result<Option<String>> {
+        let content = match source.source_type {
+            ContextSourceType::File | ContextSourceType::Interface => {
+                read_safe_file(root, &source.source_id, source.bytes.max(1), true)?
+                    .map(|(content, _, _)| content)
+            }
+            ContextSourceType::GodDirective => {
+                let path = if source.source_id == "PROJECT_DIRECTIVES" {
+                    ".batai/DIRECTIVES.md".to_owned()
+                } else if let Some(agent_id) = source.source_id.strip_prefix("AGENT_DIRECTIVES:") {
+                    format!(".batai/agents/{agent_id}/DIRECTIVES.md")
+                } else {
+                    return Ok(None);
+                };
+                read_safe_file(&self.project_root, &path, source.bytes.max(1), true)?
+                    .map(|(content, _, _)| content)
+            }
+            ContextSourceType::Decision => {
+                if source.source_id.starts_with("DEC-") {
+                    let decisions: Vec<GodDecision> =
+                        self.store.list_governance_records("GOD_DECISION")?;
+                    decisions
+                        .into_iter()
+                        .find(|decision| decision.id == source.source_id)
+                        .map(|decision| decision_content(&decision))
+                } else {
+                    let decision_root = if source.source_id.starts_with(".batai/") {
+                        &self.project_root
+                    } else {
+                        root
+                    };
+                    read_safe_file(decision_root, &source.source_id, source.bytes.max(1), true)?
+                        .map(|(content, _, _)| content)
+                }
+            }
+            ContextSourceType::Task => {
+                if source.source_id == "CURRENT_OBJECTIVE" {
+                    return Ok(Some(source.fingerprint.clone()));
+                }
+                self.store
+                    .get_task(&source.source_id)?
+                    .map(|task| task_content(&task))
+            }
+            ContextSourceType::Handoff => {
+                let path = format!(".batai/handoffs/{}.json", source.source_id);
+                read_safe_file(&self.project_root, &path, source.bytes.max(1), true)?
+                    .map(|(content, _, _)| content)
+            }
+            ContextSourceType::Review => self
+                .store
+                .list_review_outcomes::<ReviewOutcome>(None)?
+                .into_iter()
+                .find(|review| review.id == source.source_id)
+                .map(|review| review_content(&review)),
+            ContextSourceType::MeetingOutcome => self
+                .store
+                .list_meetings()?
+                .into_iter()
+                .find(|meeting| meeting.id == source.source_id)
+                .and_then(|meeting| {
+                    meeting
+                        .result
+                        .map(|result| serde_json::to_string_pretty(&result))
+                })
+                .transpose()?,
+        };
+        Ok(content.map(|value| hash_bytes(value.as_bytes())))
     }
 
     fn add_directives(
@@ -421,41 +544,44 @@ impl ContextBuilder {
         request: &ContextBuildRequest,
         project_root: &Path,
         candidates: &mut Vec<Candidate>,
+        excluded: &mut Vec<ContextExclusion>,
         warnings: &mut Vec<String>,
     ) -> Result<()> {
-        for (path, id, reason) in [
+        for (relative, id, reason) in [
             (
-                project_root.join(".batai/DIRECTIVES.md"),
+                ".batai/DIRECTIVES.md".to_owned(),
                 "PROJECT_DIRECTIVES".to_owned(),
                 "active project/GOD directives".to_owned(),
             ),
             (
-                project_root
-                    .join(".batai/agents")
-                    .join(&request.actor.id)
-                    .join("DIRECTIVES.md"),
+                format!(".batai/agents/{}/DIRECTIVES.md", request.actor.id),
                 format!("AGENT_DIRECTIVES:{}", request.actor.id),
                 "active participant directives".to_owned(),
             ),
         ] {
-            if !path.exists() {
-                continue;
-            }
-            match fs::read_to_string(&path) {
-                Ok(content) => candidates.push(Candidate {
+            match read_safe_file(
+                project_root,
+                &relative,
+                request.budget.max_bytes_per_file,
+                false,
+            ) {
+                Ok(Some((content, actual, freshness))) => candidates.push(Candidate {
                     source_type: ContextSourceType::GodDirective,
                     source_id: id,
                     reason,
                     content,
-                    freshness: file_freshness(&path),
+                    freshness: Some(format!("{}@{}", actual.to_string_lossy(), freshness)),
                     priority: 0,
-                    is_file: false,
+                    is_file: true,
                     historical: false,
                 }),
-                Err(error) => warnings.push(format!(
-                    "directive {} could not be read: {error}",
-                    path.display()
-                )),
+                Ok(None) => excluded.push(ContextExclusion {
+                    source_id: id,
+                    reason: "directive excluded by bounded safety reader".into(),
+                }),
+                Err(error) => {
+                    warnings.push(format!("directive {relative} could not be read: {error}"))
+                }
             }
         }
         Ok(())
@@ -477,13 +603,7 @@ impl ContextBuilder {
             source_type: ContextSourceType::Task,
             source_id: task.id.clone(),
             reason: "linked task definition".into(),
-            content: serde_json::to_string_pretty(&serde_json::json!({
-                "objective": task.objective,
-                "acceptanceCriteria": task.acceptance_criteria,
-                "inputs": task.inputs,
-                "outputs": task.outputs,
-                "status": task.status,
-            }))?,
+            content: task_content(&task),
             freshness: None,
             priority: 1,
             is_file: false,
@@ -511,11 +631,7 @@ impl ContextBuilder {
                 source_type: ContextSourceType::Decision,
                 source_id: decision.id.clone(),
                 reason: "accepted relevant GOD decision".into(),
-                content: format!(
-                    "APPROVED\nQuestion: {}\nResolution: {}",
-                    decision.question,
-                    decision.resolution_note.unwrap_or_default()
-                ),
+                content: decision_content(&decision),
                 freshness: decision.resolved_at,
                 priority: 3,
                 is_file: false,
@@ -570,8 +686,27 @@ impl ContextBuilder {
                     .unwrap_or(path.as_path())
                     .to_string_lossy()
                     .replace('\\', "/");
-                match fs::read_to_string(&path) {
-                    Ok(content) => {
+                let relative = path
+                    .strip_prefix(if path.starts_with(source_root) {
+                        source_root
+                    } else {
+                        project_root
+                    })
+                    .unwrap_or(path.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                let read_root = if path.starts_with(source_root) {
+                    source_root
+                } else {
+                    project_root
+                };
+                match read_safe_file(
+                    read_root,
+                    &relative,
+                    request.budget.max_bytes_per_file,
+                    false,
+                ) {
+                    Ok(Some((content, actual, freshness))) => {
                         let upper = content.to_ascii_uppercase();
                         if upper.contains("SUPERSEDED") || upper.contains("REJECTED") {
                             excluded.push(ContextExclusion {
@@ -584,13 +719,21 @@ impl ContextBuilder {
                                 source_id: id,
                                 reason: "accepted relevant architecture decision".into(),
                                 content,
-                                freshness: file_freshness(&path),
+                                freshness: Some(format!(
+                                    "{}@{}",
+                                    actual.to_string_lossy(),
+                                    freshness
+                                )),
                                 priority: 3,
-                                is_file: false,
+                                is_file: true,
                                 historical: true,
                             });
                         }
                     }
+                    Ok(None) => excluded.push(ContextExclusion {
+                        source_id: id,
+                        reason: "architecture decision excluded by bounded safety reader".into(),
+                    }),
                     Err(error) => warnings.push(format!(
                         "architecture decision {} could not be read: {error}",
                         path.display()
@@ -606,28 +749,34 @@ impl ContextBuilder {
         request: &ContextBuildRequest,
         project_root: &Path,
         candidates: &mut Vec<Candidate>,
+        excluded: &mut Vec<ContextExclusion>,
         warnings: &mut Vec<String>,
     ) -> Result<()> {
         let Some(task_id) = request.linked_task.as_deref() else {
             return Ok(());
         };
-        let path = project_root
-            .join(".batai/handoffs")
-            .join(format!("{task_id}.json"));
-        if path.exists() {
-            match fs::read_to_string(&path) {
-                Ok(content) => candidates.push(Candidate {
-                    source_type: ContextSourceType::Handoff,
-                    source_id: task_id.into(),
-                    reason: "latest linked task handoff".into(),
-                    content,
-                    freshness: file_freshness(&path),
-                    priority: 7,
-                    is_file: false,
-                    historical: true,
-                }),
-                Err(error) => warnings.push(format!("handoff could not be read: {error}")),
-            }
+        let relative = format!(".batai/handoffs/{task_id}.json");
+        match read_safe_file(
+            project_root,
+            &relative,
+            request.budget.max_bytes_per_file,
+            false,
+        ) {
+            Ok(Some((content, actual, freshness))) => candidates.push(Candidate {
+                source_type: ContextSourceType::Handoff,
+                source_id: task_id.into(),
+                reason: "latest linked task handoff".into(),
+                content,
+                freshness: Some(format!("{}@{}", actual.to_string_lossy(), freshness)),
+                priority: 7,
+                is_file: true,
+                historical: true,
+            }),
+            Ok(None) => excluded.push(ContextExclusion {
+                source_id: task_id.into(),
+                reason: "handoff excluded by bounded safety reader".into(),
+            }),
+            Err(error) => warnings.push(format!("handoff could not be read: {error}")),
         }
         Ok(())
     }
@@ -647,15 +796,10 @@ impl ContextBuilder {
         {
             candidates.push(Candidate {
                 source_type: ContextSourceType::Review,
-                source_id: review.id,
+                source_id: review.id.clone(),
                 reason: "review finding for linked task".into(),
-                content: format!(
-                    "Outcome: {:?}\nReviewer: {}\nFinding: {}",
-                    review.outcome,
-                    review.reviewer_id,
-                    review.note.unwrap_or_default()
-                ),
-                freshness: Some(review.created_at),
+                content: review_content(&review),
+                freshness: Some(review.created_at.clone()),
                 priority: 6,
                 is_file: false,
                 historical: true,
@@ -793,6 +937,7 @@ fn read_safe_file(
     max_bytes: u64,
     required: bool,
 ) -> Result<Option<(String, PathBuf, String)>> {
+    let root = canonical_directory(root)?;
     let relative_path = Path::new(relative);
     if relative_path.is_absolute()
         || relative_path
@@ -821,7 +966,7 @@ fn read_safe_file(
         return Ok(None);
     }
     let actual = candidate.canonicalize()?;
-    if !actual.starts_with(root) {
+    if !actual.starts_with(&root) {
         return Err(RuntimeError::Governance(format!(
             "context path resolves outside worktree: {relative}"
         )));
@@ -834,9 +979,10 @@ fn read_safe_file(
     if bytes.contains(&0) {
         return Ok(None);
     }
-    let content = String::from_utf8(bytes).map_err(|_| {
-        RuntimeError::Governance(format!("binary/non-UTF8 context excluded: {relative}"))
-    })?;
+    let content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(_) => return Ok(None),
+    };
     Ok(Some((
         content,
         actual,
@@ -970,7 +1116,30 @@ fn blocked_package(
         warnings,
         estimated_tokens: 0,
         total_bytes: 0,
+        max_bytes_per_file: request.budget.max_bytes_per_file,
     }
+}
+
+fn task_content(task: &Task) -> String {
+    serde_json::to_string_pretty(task).unwrap_or_else(|_| task.objective.clone())
+}
+
+fn decision_content(decision: &GodDecision) -> String {
+    format!(
+        "Status: {:?}\nQuestion: {}\nResolution: {}",
+        decision.status,
+        decision.question,
+        decision.resolution_note.clone().unwrap_or_default()
+    )
+}
+
+fn review_content(review: &ReviewOutcome) -> String {
+    format!(
+        "Outcome: {:?}\nReviewer: {}\nFinding: {}",
+        review.outcome,
+        review.reviewer_id,
+        review.note.clone().unwrap_or_default()
+    )
 }
 
 fn keywords(value: &str) -> BTreeSet<String> {
@@ -1184,24 +1353,57 @@ mod tests {
     #[test]
     fn worktree_content_and_role_specific_sources_are_used() {
         let temp = tempfile::tempdir().unwrap();
-        let worktree = tempfile::tempdir().unwrap();
         fs::create_dir_all(temp.path().join(".batai")).unwrap();
-        fs::create_dir_all(worktree.path().join("src/runtime")).unwrap();
         fs::write(temp.path().join("contract.rs"), "base version").unwrap();
-        fs::write(worktree.path().join("contract.rs"), "worktree version").unwrap();
-        fs::write(worktree.path().join("src/runtime/api.rs"), "backend API").unwrap();
-        fs::write(worktree.path().join("README.md"), "architecture map").unwrap();
+        fs::create_dir_all(temp.path().join("src/runtime")).unwrap();
+        fs::write(temp.path().join("src/runtime/api.rs"), "backend API").unwrap();
+        fs::write(temp.path().join("README.md"), "architecture map").unwrap();
+        git_test(temp.path(), &["init", "-b", "main"]);
+        git_test(
+            temp.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git_test(temp.path(), &["config", "user.name", "Batai Test"]);
+        git_test(
+            temp.path(),
+            &["add", "contract.rs", "src/runtime/api.rs", "README.md"],
+        );
+        git_test(temp.path(), &["commit", "-m", "fixture"]);
         let store = RuntimeStore::open(temp.path().join("runtime.sqlite")).unwrap();
+        let task = Task {
+            id: "TASK-1".into(),
+            created_by: "director".into(),
+            objective: "Worktree context".into(),
+            assigned_to: vec!["participant".into()],
+            dependencies: Vec::new(),
+            acceptance_criteria: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            status: TaskStatus::Ready,
+            execution: TaskExecution::default(),
+            on_success: TaskSuccessAction::default(),
+            on_failure: TaskSuccessAction::default(),
+            weight: 1.0,
+            extra: Default::default(),
+        };
+        store.ingest_task(&task, None, "fixture").unwrap();
+        let manager = WorktreeManager::discover(temp.path()).unwrap();
+        let binding = manager.ensure("participant", "TASK-1").unwrap();
+        fs::write(binding.path.join("contract.rs"), "worktree version").unwrap();
+        fs::write(binding.path.join("src/runtime/api.rs"), "backend API").unwrap();
+        fs::write(binding.path.join("README.md"), "architecture map").unwrap();
         let builder = ContextBuilder::new(temp.path().into(), store.clone());
 
         let mut backend = request(temp.path(), &store, AgentFunction::BackendEngineering);
-        backend.worktree = Some(worktree.path().into());
+        backend.linked_task = Some("TASK-1".into());
+        backend.worktree = Some(binding.path.clone());
         backend.explicit_files = vec!["contract.rs".into()];
         let backend = builder.build(backend).unwrap();
         assert!(backend.render().contains("worktree version"));
 
         let mut architect = request(temp.path(), &store, AgentFunction::SoftwareArchitecture);
-        architect.worktree = Some(worktree.path().into());
+        architect.linked_task = Some("TASK-1".into());
+        architect.worktree = Some(binding.path);
         let architect = builder.build(architect).unwrap();
         assert!(architect
             .items
@@ -1211,6 +1413,20 @@ mod tests {
             .items
             .iter()
             .any(|item| item.record.source_id == "src/runtime/api.rs"));
+    }
+
+    fn git_test(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {:?}: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -1246,5 +1462,86 @@ mod tests {
             .excluded
             .iter()
             .any(|item| item.source_id.ends_with("ADR-002.md")));
+    }
+
+    #[test]
+    fn file_backed_sources_share_bound_and_freshness_reader() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join(".batai/handoffs")).unwrap();
+        fs::create_dir_all(temp.path().join(".batai/adrs")).unwrap();
+        fs::write(temp.path().join(".batai/DIRECTIVES.md"), "directive").unwrap();
+        fs::write(
+            temp.path().join(".batai/handoffs/TASK-1.json"),
+            "handoff context",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join(".batai/adrs/ADR-001.md"),
+            "authentication contract",
+        )
+        .unwrap();
+        let store = RuntimeStore::open(temp.path().join("runtime.sqlite")).unwrap();
+        let task = Task {
+            id: "TASK-1".into(),
+            created_by: "director".into(),
+            objective: "authentication contract".into(),
+            assigned_to: vec!["participant".into()],
+            dependencies: Vec::new(),
+            acceptance_criteria: Vec::new(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            status: TaskStatus::Ready,
+            execution: TaskExecution::default(),
+            on_success: TaskSuccessAction::default(),
+            on_failure: TaskSuccessAction::default(),
+            weight: 1.0,
+            extra: Default::default(),
+        };
+        store.ingest_task(&task, None, "fixture").unwrap();
+        let builder = ContextBuilder::new(temp.path().into(), store.clone());
+        let mut value = request(temp.path(), &store, AgentFunction::BackendEngineering);
+        value.linked_task = Some("TASK-1".into());
+        value.budget.max_bytes_per_file = 4;
+        let bounded = builder.build(value.clone()).unwrap();
+        assert!(bounded
+            .excluded
+            .iter()
+            .any(|item| item.source_id == "PROJECT_DIRECTIVES"));
+        assert!(bounded
+            .excluded
+            .iter()
+            .any(|item| item.source_id.ends_with("ADR-001.md")));
+        assert!(bounded
+            .excluded
+            .iter()
+            .any(|item| item.source_id == "TASK-1"));
+
+        value.budget.max_bytes_per_file = ContextBudget::default().max_bytes_per_file;
+        let package = builder.build(value).unwrap();
+        assert!(builder.is_fresh(&package.record(), temp.path()).unwrap());
+        fs::write(
+            temp.path().join(".batai/DIRECTIVES.md"),
+            "changed directive",
+        )
+        .unwrap();
+        assert!(!builder.is_fresh(&package.record(), temp.path()).unwrap());
+        let mut changed_task = task;
+        changed_task.objective = "changed objective".into();
+        store.ingest_task(&changed_task, None, "fixture").unwrap();
+        assert!(!builder.is_fresh(&package.record(), temp.path()).unwrap());
+    }
+
+    #[test]
+    fn arbitrary_worktree_is_rejected_but_project_root_is_allowed() {
+        let temp = tempfile::tempdir().unwrap();
+        let arbitrary = tempfile::tempdir().unwrap();
+        let store = RuntimeStore::open(temp.path().join("runtime.sqlite")).unwrap();
+        let builder = ContextBuilder::new(temp.path().into(), store.clone());
+        let mut value = request(temp.path(), &store, AgentFunction::BackendEngineering);
+        value.worktree = Some(arbitrary.path().into());
+        assert!(builder.build(value).is_err());
+
+        let value = request(temp.path(), &store, AgentFunction::BackendEngineering);
+        assert!(builder.build(value).is_ok());
     }
 }

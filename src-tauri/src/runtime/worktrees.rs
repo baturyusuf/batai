@@ -126,6 +126,70 @@ impl WorktreeManager {
             .map(str::to_owned)
             .collect())
     }
+
+    pub fn validate_context_worktree(
+        &self,
+        path: &Path,
+        agent_id: &str,
+        task_id: Option<&str>,
+    ) -> Result<()> {
+        let actual = path.canonicalize().map_err(|_| {
+            RuntimeError::Governance(format!(
+                "managed context worktree is missing: {}",
+                path.display()
+            ))
+        })?;
+        let repository = self.repository.canonicalize()?;
+        if actual == repository {
+            return Err(RuntimeError::Governance(
+                "default repository root cannot be used as an isolated agent worktree".into(),
+            ));
+        }
+        let managed_root = self
+            .root
+            .canonicalize()
+            .map_err(|_| RuntimeError::Governance("managed worktree root is missing".into()))?;
+        if !actual.starts_with(&managed_root) {
+            return Err(RuntimeError::Governance(
+                "context worktree is not under the Batai-managed worktree root".into(),
+            ));
+        }
+        let common_dir = run_git(&actual, &["rev-parse", "--git-common-dir"])?
+            .trim()
+            .to_owned();
+        let common_dir = PathBuf::from(common_dir);
+        let common_dir = if common_dir.is_absolute() {
+            common_dir
+        } else {
+            actual.join(common_dir)
+        }
+        .canonicalize()?;
+        let repository_git_dir = repository.join(".git").canonicalize()?;
+        if common_dir != repository_git_dir {
+            return Err(RuntimeError::Governance(
+                "context worktree belongs to a different repository".into(),
+            ));
+        }
+        let branch = run_git(&actual, &["branch", "--show-current"])?
+            .trim()
+            .to_owned();
+        let agent = safe_component(agent_id)?;
+        let prefix = format!("batai/{agent}/");
+        if !branch.starts_with(&prefix) {
+            return Err(RuntimeError::Governance(format!(
+                "context worktree branch is not managed for agent {agent_id}: {branch}"
+            )));
+        }
+        if let Some(task_id) = task_id {
+            let expected = format!("batai/{agent}/{}", safe_component(task_id)?);
+            if branch != expected {
+                return Err(RuntimeError::Governance(format!(
+                    "context worktree branch mismatch: expected {expected}, found {branch}"
+                )));
+            }
+        }
+        Ok(())
+    }
     pub fn diff(&self, binding: &WorktreeBinding) -> Result<String> {
         run_git(&binding.path, &["diff", "--binary", "HEAD"])
     }
@@ -367,6 +431,23 @@ mod tests {
         run_git(&binding.path, &["checkout", "-b", "unexpected"]).unwrap();
         let error = manager.ensure("coder", "TASK-1").unwrap_err();
         assert!(error.to_string().contains("branch mismatch"));
+    }
+
+    #[test]
+    fn context_validation_requires_managed_repository_worktree() {
+        let repo = repo();
+        let manager = WorktreeManager::discover(repo.path()).unwrap();
+        let binding = manager.ensure("coder", "TASK-1").unwrap();
+        manager
+            .validate_context_worktree(&binding.path, "coder", Some("TASK-1"))
+            .unwrap();
+        assert!(manager
+            .validate_context_worktree(repo.path(), "coder", Some("TASK-1"))
+            .is_err());
+        run_git(&binding.path, &["checkout", "-b", "unmanaged"]).unwrap();
+        assert!(manager
+            .validate_context_worktree(&binding.path, "coder", Some("TASK-1"))
+            .is_err());
     }
 
     #[test]
